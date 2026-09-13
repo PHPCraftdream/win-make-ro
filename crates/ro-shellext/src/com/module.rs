@@ -6,8 +6,9 @@ use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 
 static HANDLE: AtomicIsize = AtomicIsize::new(0);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
+static LOCKS: AtomicUsize = AtomicUsize::new(0);
 
-/// Process-wide DLL state: module handle and live COM object count.
+/// Process-wide DLL state: module handle, live COM objects and server locks.
 pub struct Module;
 
 impl Module {
@@ -38,6 +39,7 @@ impl Module {
         Self::dll_path().map(|p| p.with_file_name("win-make-ro.exe"))
     }
 
+    /// Every COM object this DLL hands out counts, the class factory included.
     pub fn object_created() {
         LIVE.fetch_add(1, Ordering::AcqRel);
     }
@@ -46,7 +48,20 @@ impl Module {
         LIVE.fetch_sub(1, Ordering::AcqRel);
     }
 
-    pub fn live_objects() -> usize {
-        LIVE.load(Ordering::Acquire)
+    /// `IClassFactory::LockServer`: keeps the DLL loaded with no live objects.
+    pub fn set_server_lock(locked: bool) {
+        if locked {
+            LOCKS.fetch_add(1, Ordering::AcqRel);
+        } else {
+            LOCKS
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| Some(n.saturating_sub(1)))
+                .ok();
+        }
+    }
+
+    /// Unloading is only safe with nothing alive and no outstanding lock.
+    /// See <https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-dllcanunloadnow>.
+    pub fn can_unload() -> bool {
+        LIVE.load(Ordering::Acquire) == 0 && LOCKS.load(Ordering::Acquire) == 0
     }
 }

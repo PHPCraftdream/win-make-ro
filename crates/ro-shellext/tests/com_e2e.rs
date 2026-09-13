@@ -247,6 +247,33 @@ fn full_cycle_through_com() {
     assert_eq!(dll.can_unload(), S_OK);
 }
 
+/// The class factory is a COM object the caller holds, and LockServer must
+/// keep the DLL loaded on its own. Both used to report "safe to unload".
+#[test]
+fn unload_is_refused_while_the_factory_or_a_server_lock_is_held() {
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let dll = Dll::load();
+    assert_eq!(dll.can_unload(), S_OK, "nothing held yet");
+
+    let factory = dll.factory();
+    assert_eq!(dll.can_unload(), S_FALSE, "factory is still alive");
+    drop(factory);
+    assert_eq!(dll.can_unload(), S_OK, "factory released");
+
+    let factory = dll.factory();
+    // SAFETY: live factory.
+    unsafe { factory.LockServer(true) }.unwrap();
+    drop(factory);
+    assert_eq!(dll.can_unload(), S_FALSE, "server lock outlives the factory");
+
+    let factory = dll.factory();
+    // SAFETY: live factory.
+    unsafe { factory.LockServer(false) }.unwrap();
+    drop(factory);
+    assert_eq!(dll.can_unload(), S_OK, "lock released");
+}
+
 #[test]
 fn initialize_without_selection_fails() {
     // SAFETY: first COM call on this thread.

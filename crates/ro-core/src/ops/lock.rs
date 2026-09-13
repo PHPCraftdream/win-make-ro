@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::types::{Error, ErrorKind, Result};
-use crate::win::acl::{AclBuilder, Dacl, aces, write_dacl};
+use crate::win::acl::{AclBuilder, Dacl, ace_size, aces, write_dacl};
 use crate::win::{Sid, set_readonly_attr, wide_path};
 
 /// Adds the lock ACE to one item (plus the READONLY attribute on files).
@@ -19,10 +19,17 @@ pub fn lock(path: &Path) -> Result<bool> {
     if old.iter().any(|a| !a.inherited() && a.is_lock(&everyone)) {
         return Ok(false);
     }
-    let mut b = AclBuilder::new(dacl.acl, 8 + everyone.len() as usize);
+    // A NULL DACL grants everyone everything; an ACL holding only our deny
+    // would instead refuse everything, so materialise the implied allow.
+    let was_null = dacl.acl.is_null();
+    let extra = ace_size(&everyone) * if was_null { 2 } else { 1 };
+    let mut b = AclBuilder::new(dacl.acl, extra);
     let io = |e| Error::os(path, e);
     // Canonical order: explicit denies first, so the lock goes to the front.
     b.push_lock(&everyone, meta.is_dir()).map_err(io)?;
+    if was_null {
+        b.push_allow_all(&everyone).map_err(io)?;
+    }
     for a in old {
         b.push(a).map_err(io)?;
     }

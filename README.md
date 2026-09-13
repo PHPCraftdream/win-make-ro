@@ -29,6 +29,13 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 - **Remove read only** on a folder removes the folder's ACE (inherited copies
   disappear with it) and then walks the tree removing every explicit lock set
   earlier on nested items.
+- An inherited lock is trusted only when nothing shadows it. Windows evaluates
+  a DACL in order, so an explicit allow on a child would win over the deny
+  inherited from the parent; such children get an explicit lock of their own.
+- An item with a NULL DACL (everyone may do everything) keeps that meaning: the
+  lock materialises the implied allow alongside the deny, and unlocking puts
+  the NULL DACL back rather than leaving an empty one, which would deny
+  everyone everything.
 - Items that are locked only through a parent show a disabled entry
   *Read only (inherited from parent folder)*; unlock the parent instead.
 - Symlinks and junctions are never touched or descended.
@@ -83,6 +90,8 @@ cargo test --workspace
   checks the menu items and invokes them; the DLL waits for the helper when
   `WIN_MAKE_RO_SYNC=1` is set.
 - `ro-register/tests`: registry writes against a scratch key under HKCU.
+- `ro-core/tests/regressions.rs`: the review findings, each pinned to the
+  behaviour that used to be wrong.
 
 ## License
 

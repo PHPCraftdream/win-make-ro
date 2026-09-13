@@ -1,6 +1,6 @@
-use super::{Dacl, aces};
 use crate::types::LockState;
 use crate::win::Sid;
+use crate::win::acl::{Dacl, aces};
 
 pub fn state_of(dacl: &Dacl, everyone: &Sid) -> LockState {
     let mut inherited = false;

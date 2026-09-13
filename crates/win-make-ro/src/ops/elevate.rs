@@ -9,7 +9,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 use windows::core::PCWSTR;
 
-use super::show_error;
+use super::{quote, show_error};
 use crate::cli::{Args, EXIT_ERRORS};
 
 /// Re-runs this executable elevated (UAC) with `--no-elevate` and returns
@@ -57,9 +57,4 @@ pub fn elevate(args: &Args) -> i32 {
         let _ = CloseHandle(info.hProcess);
     }
     code as i32
-}
-
-/// Windows command-line quoting for one argument (paths cannot contain `"`).
-fn quote(a: &str) -> String {
-    format!("\"{}\"", a.replace('"', "\\\""))
 }

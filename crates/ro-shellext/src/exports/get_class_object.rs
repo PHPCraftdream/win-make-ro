@@ -16,7 +16,7 @@ pub unsafe extern "system" fn DllGetClassObject(
     if unsafe { *rclsid } != CLSID_MENU_EXT {
         return CLASS_E_CLASSNOTAVAILABLE;
     }
-    let factory: IClassFactory = ClassFactory.into();
+    let factory: IClassFactory = ClassFactory::new().into();
     // SAFETY: riid/ppv are valid per the COM contract.
     unsafe { factory.query(riid, ppv) }
 }

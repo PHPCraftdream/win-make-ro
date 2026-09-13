@@ -4,12 +4,18 @@ use windows::Win32::Security::{
     ACE_HEADER, ACE_REVISION, ACL, ACL_REVISION, AddAce, CONTAINER_INHERIT_ACE, InitializeAcl,
     OBJECT_INHERIT_ACE,
 };
+use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
-use super::{AceRef, DENY_TYPE};
+use super::{ALLOW_TYPE, AceRef, DENY_TYPE};
 use crate::types::LOCK_MASK;
 use crate::win::Sid;
 
 const MAXDWORD: u32 = u32::MAX;
+
+/// Bytes an ACE for `sid` occupies: header + mask + the SID itself.
+pub fn ace_size(sid: &Sid) -> usize {
+    std::mem::size_of::<ACE_HEADER>() + 4 + sid.len() as usize
+}
 
 /// Assembles a new ACL in a 4-byte-aligned buffer, keeping the old revision.
 pub struct AclBuilder {
@@ -49,23 +55,33 @@ impl AclBuilder {
         self.push_raw(ace.ptr as *const _, u32::from(ace.header().AceSize))
     }
 
-    /// Appends the lock ACE; `inheritable` = OI|CI for directories.
-    pub fn push_lock(&mut self, everyone: &Sid, inheritable: bool) -> io::Result<()> {
-        let sid_len = everyone.len() as usize;
-        let size = std::mem::size_of::<ACE_HEADER>() + 4 + sid_len;
+    fn push_ace(&mut self, kind: u8, mask: u32, sid: &Sid, flags: u8) -> io::Result<()> {
+        let sid_len = sid.len() as usize;
+        let size = ace_size(sid);
         let mut bytes = vec![0u8; size];
-        let flags = if inheritable { OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0 } else { 0 };
-        let header = ACE_HEADER { AceType: DENY_TYPE, AceFlags: flags as u8, AceSize: size as u16 };
+        let header = ACE_HEADER { AceType: kind, AceFlags: flags, AceSize: size as u16 };
         // SAFETY: plain-old-data copies into a buffer of exactly `size` bytes.
         unsafe {
             std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut ACE_HEADER, header);
-            std::ptr::write_unaligned(bytes.as_mut_ptr().add(4) as *mut u32, LOCK_MASK);
+            std::ptr::write_unaligned(bytes.as_mut_ptr().add(4) as *mut u32, mask);
             std::ptr::copy_nonoverlapping(
-                everyone.psid().0 as *const u8,
+                sid.psid().0 as *const u8,
                 bytes.as_mut_ptr().add(8),
                 sid_len,
             );
         }
         self.push_raw(bytes.as_ptr() as *const _, size as u32)
+    }
+
+    /// Appends the lock ACE; `inheritable` = OI|CI for directories.
+    pub fn push_lock(&mut self, everyone: &Sid, inheritable: bool) -> io::Result<()> {
+        let flags = if inheritable { OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0 } else { 0 };
+        self.push_ace(DENY_TYPE, LOCK_MASK, everyone, flags as u8)
+    }
+
+    /// Appends an allow-everything ACE for `Everyone`, the explicit equivalent
+    /// of a NULL DACL. Never inheritable: a NULL DACL propagates nothing.
+    pub fn push_allow_all(&mut self, everyone: &Sid) -> io::Result<()> {
+        self.push_ace(ALLOW_TYPE, FILE_ALL_ACCESS.0, everyone, 0)
     }
 }
