@@ -2,10 +2,11 @@ use std::path::Path;
 
 use crate::types::{Error, ErrorKind, Result};
 use crate::win::acl::{AclBuilder, Dacl, aces, write_dacl};
-use crate::win::{Sid, wide_path};
+use crate::win::{Sid, set_readonly_attr, wide_path};
 
-/// Adds the lock ACE to one item. Idempotent. Directories get an inheritable
-/// ACE, which Windows propagates to the whole subtree in this call.
+/// Adds the lock ACE to one item (plus the READONLY attribute on files).
+/// Idempotent. Directories get an inheritable ACE, which Windows propagates
+/// to the whole subtree in this call.
 pub fn lock(path: &Path) -> Result<bool> {
     let wide = wide_path(path).map_err(|e| Error::os(path, e))?;
     let meta = std::fs::symlink_metadata(path).map_err(|e| Error::os(path, e))?;
@@ -25,6 +26,16 @@ pub fn lock(path: &Path) -> Result<bool> {
     for a in old {
         b.push(a).map_err(io)?;
     }
-    write_dacl(path, &wide, b.acl())?;
+    // Files: the attribute blocks delete/rename via parent FILE_DELETE_CHILD.
+    // Set it first; once the DACL is in place nobody may write attributes.
+    if !meta.is_dir() {
+        set_readonly_attr(path, true).map_err(io)?;
+    }
+    if let Err(e) = write_dacl(path, &wide, b.acl()) {
+        if !meta.is_dir() {
+            let _ = set_readonly_attr(path, false);
+        }
+        return Err(e);
+    }
     Ok(true)
 }

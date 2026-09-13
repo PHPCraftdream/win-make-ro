@@ -2,9 +2,9 @@ use std::path::Path;
 
 use crate::types::{Error, ErrorKind, LockState, Result};
 use crate::win::acl::{AclBuilder, Dacl, aces, state_of, write_dacl};
-use crate::win::{Sid, wide_path};
+use crate::win::{Sid, set_readonly_attr, wide_path};
 
-/// Removes the explicit lock ACE from one item. `Ok(false)` when there was
+/// Removes the explicit lock ACE (and the READONLY attribute) from one item. `Ok(false)` when there was
 /// none; `LockedByParent` if only an inherited lock exists.
 pub fn unlock(path: &Path) -> Result<bool> {
     let wide = wide_path(path).map_err(|e| Error::os(path, e))?;
@@ -24,5 +24,8 @@ pub fn unlock(path: &Path) -> Result<bool> {
         b.push(a).map_err(|e| Error::os(path, e))?;
     }
     write_dacl(path, &wide, b.acl())?;
+    if !meta.is_dir() {
+        set_readonly_attr(path, false).map_err(|e| Error::os(path, e))?;
+    }
     Ok(true)
 }

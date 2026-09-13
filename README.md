@@ -17,6 +17,12 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 
 - Reading stays allowed; writing, renaming, deleting and creating inside a
   locked folder are denied for every account, including administrators.
+- A locked *file* additionally gets the READONLY attribute, which nobody can
+  clear while the ACE denies `FILE_WRITE_ATTRIBUTES`. Windows still lets a
+  caller who holds `FILE_DELETE_CHILD` on the parent folder rename the file, or
+  delete it with POSIX delete semantics that ignore the attribute (Rust's
+  `std::fs::remove_file` does this; Explorer, `del`, PowerShell do not). To
+  rule that out, lock the folder.
 - On a folder the ACE is inheritable (OI|CI), so Windows propagates it to the
   whole subtree in one call. Descendants whose inheritance is disabled get an
   explicit ACE during the recursive walk.

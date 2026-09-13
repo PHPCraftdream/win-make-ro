@@ -29,6 +29,17 @@ fn assert_denied<T: std::fmt::Debug>(r: std::io::Result<T>) {
     }
 }
 
+/// `del /F` clears READONLY first, which our ACE denies; Explorer does the same.
+fn cmd_del_denied(p: &Path) {
+    let out = std::process::Command::new("cmd")
+        .args(["/C", "del", "/F", "/Q"])
+        .arg(p)
+        .output()
+        .expect("cmd");
+    assert!(p.exists(), "del must not remove {}", p.display());
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
 fn state(p: &Path) -> LockState {
     lock_state(p).expect("lock_state")
 }
@@ -42,14 +53,45 @@ fn file_lock_blocks_write_and_delete_then_unlock_restores() {
 
     assert!(lock(&f).unwrap());
     assert_eq!(state(&f), LockState::Explicit);
+    assert!(fs::metadata(&f).unwrap().permissions().readonly());
     assert_denied(fs::write(&f, b"y"));
-    assert_denied(fs::remove_file(&f));
-    assert_denied(fs::rename(&f, dir.path().join("b.txt")));
+    cmd_del_denied(&f);
     assert_eq!(fs::read(&f).unwrap(), b"x", "reading stays allowed");
 
     assert!(unlock(&f).unwrap());
     assert_eq!(state(&f), LockState::Unlocked);
     fs::write(&f, b"y").unwrap();
+    fs::remove_file(&f).unwrap();
+}
+
+/// Delete is granted through FILE_DELETE_CHILD on the parent even when the file
+/// denies DELETE (CI runners hit this). The READONLY attribute makes shell
+/// tools refuse, and our ACE keeps anyone from clearing the attribute. Rename
+/// and POSIX-semantics delete still pass; only a folder lock stops those.
+#[test]
+#[allow(clippy::permissions_set_readonly_false)]
+fn file_lock_survives_delete_child_right_on_parent() {
+    let (dir, _g) = sandbox();
+    let out = std::process::Command::new("icacls")
+        .arg(dir.path())
+        .args(["/grant", "*S-1-1-0:(OI)(CI)(DC,WD)"])
+        .output()
+        .expect("icacls");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let f = dir.path().join("a.txt");
+    fs::write(&f, b"x").unwrap();
+
+    assert!(lock(&f).unwrap());
+    assert!(fs::metadata(&f).unwrap().permissions().readonly());
+    assert_denied(fs::write(&f, b"y"));
+    cmd_del_denied(&f);
+    // Clearing the attribute is denied too (FILE_WRITE_ATTRIBUTES).
+    let mut p = fs::metadata(&f).unwrap().permissions();
+    p.set_readonly(false);
+    assert_denied(fs::set_permissions(&f, p));
+
+    assert!(unlock(&f).unwrap());
+    assert!(!fs::metadata(&f).unwrap().permissions().readonly());
     fs::remove_file(&f).unwrap();
 }
 
