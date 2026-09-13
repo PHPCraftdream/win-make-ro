@@ -1,0 +1,95 @@
+# win-make-ro
+
+[![CI](https://github.com/PHPCraftdream/win-make-ro/actions/workflows/ci.yml/badge.svg)](https://github.com/PHPCraftdream/win-make-ro/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 2024](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4.svg)](#build-install-remove)
+
+Explorer context-menu items **Make read only** / **Remove read only** for files and
+folders on NTFS.
+
+## How the lock works
+
+The lock is an explicit *deny* ACE for `Everyone` in the item's DACL with exactly
+these rights: write data, append data, write EA, write attributes, delete,
+delete child. That exact mask is the signature: an ACE with this mask and this
+trustee is recognised as ours, nothing else is. No extra marker is stored.
+
+- Reading stays allowed; writing, renaming, deleting and creating inside a
+  locked folder are denied for every account, including administrators.
+- On a folder the ACE is inheritable (OI|CI), so Windows propagates it to the
+  whole subtree in one call. Descendants whose inheritance is disabled get an
+  explicit ACE during the recursive walk.
+- **Remove read only** on a folder removes the folder's ACE (inherited copies
+  disappear with it) and then walks the tree removing every explicit lock set
+  earlier on nested items.
+- Items that are locked only through a parent show a disabled entry
+  *Read only (inherited from parent folder)*; unlock the parent instead.
+- Symlinks and junctions are never touched or descended.
+- Changing a DACL needs `WRITE_DAC`. The owner always has it, so own files need
+  no elevation. On `ERROR_ACCESS_DENIED` the helper re-launches itself through
+  UAC and re-runs the same (idempotent) operation.
+
+## Layout
+
+| crate          | what                                                              |
+|----------------|-------------------------------------------------------------------|
+| `ro-core`      | ACL logic: `lock_state`, `lock`, `unlock`, `lock_tree`, `unlock_tree` |
+| `ro-register`  | per-user registry (`HKCU\Software\Classes`) install / uninstall  |
+| `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `uninstall`    |
+| `ro-shellext`  | COM DLL: `IShellExtInit` + `IContextMenu`, launches the helper    |
+
+## Build, install, remove
+
+```
+cargo build --release
+mkdir dist && copy target\release\win-make-ro.exe dist\ && copy target\release\ro_shellext.dll dist\
+dist\install.cmd                    # = dist\win-make-ro.exe install   (or regsvr32 dist\ro_shellext.dll)
+dist\uninstall.cmd                  # = dist\win-make-ro.exe uninstall (or regsvr32 /u dist\ro_shellext.dll)
+```
+
+Registration is per user and needs no admin rights. Keep `win-make-ro.exe`
+next to `ro_shellext.dll`; the DLL looks for the helper in its own directory.
+Explorer keeps the DLL loaded after the first use, so replacing `dist\` files
+requires restarting `explorer.exe` first.
+
+## CLI
+
+```
+win-make-ro lock   [--gui] [--no-elevate] -- <path>...
+win-make-ro unlock [--gui] [--no-elevate] -- <path>...
+win-make-ro status -- <path>...          # prints "<unlocked|locked|inherited>\t<path>"
+```
+
+Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with
+`--gui`), 2 usage error.
+
+## Tests
+
+```
+cargo test --workspace
+```
+
+- `ro-core/tests`: real ACLs in a temp directory (files, folders, inheritance,
+  nested locks, blocked inheritance, junctions, foreign deny ACEs).
+- `win-make-ro/tests/cli.rs`: the built helper end-to-end.
+- `ro-shellext/tests/com_e2e.rs`: loads the DLL, builds a shell data object,
+  checks the menu items and invokes them; the DLL waits for the helper when
+  `WIN_MAKE_RO_SYNC=1` is set.
+- `ro-register/tests`: registry writes against a scratch key under HKCU.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.

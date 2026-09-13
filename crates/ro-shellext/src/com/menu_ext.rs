@@ -1,0 +1,151 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+use windows::Win32::System::Com::IDataObject;
+use windows::Win32::System::Registry::HKEY;
+use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use windows::Win32::UI::Shell::{
+    CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, GCS_HELPTEXTW, GCS_VERBW, IContextMenu,
+    IContextMenu_Impl, IShellExtInit, IShellExtInit_Impl,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    HMENU, InsertMenuW, MENUITEMINFOW, MF_BYPOSITION, MF_GRAYED, MF_STRING, MIIM_BITMAP,
+    SetMenuItemInfoW,
+};
+use windows::core::{HRESULT, PCWSTR, PSTR, Ref, Result, implement};
+
+use super::{Module, hdrop_paths};
+use crate::menu::{Item, Selection, launch, menu_bitmap, plan};
+
+/// One instance per context-menu invocation (Apartment threaded).
+#[implement(IShellExtInit, IContextMenu)]
+pub struct MenuExt {
+    paths: Mutex<Vec<PathBuf>>,
+    items: Mutex<Vec<Item>>,
+}
+
+impl MenuExt {
+    pub fn new() -> Self {
+        Module::object_created();
+        Self { paths: Mutex::new(Vec::new()), items: Mutex::new(Vec::new()) }
+    }
+
+    fn lock_paths(&self) -> Vec<PathBuf> {
+        self.paths.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    fn lock_items(&self) -> Vec<Item> {
+        self.items.lock().map(|i| i.clone()).unwrap_or_default()
+    }
+}
+
+impl Drop for MenuExt {
+    fn drop(&mut self) {
+        Module::object_dropped();
+    }
+}
+
+impl IShellExtInit_Impl for MenuExt_Impl {
+    fn Initialize(
+        &self,
+        _pidl: *const ITEMIDLIST,
+        pdtobj: Ref<IDataObject>,
+        _hkey: HKEY,
+    ) -> Result<()> {
+        let data = pdtobj.ok()?;
+        let paths = hdrop_paths(data)?;
+        if paths.is_empty() {
+            return Err(E_INVALIDARG.into());
+        }
+        *self.paths.lock().map_err(|_| E_FAIL)? = paths;
+        Ok(())
+    }
+}
+
+impl IContextMenu_Impl for MenuExt_Impl {
+    fn QueryContextMenu(
+        &self,
+        hmenu: HMENU,
+        indexmenu: u32,
+        idcmdfirst: u32,
+        _idcmdlast: u32,
+        uflags: u32,
+    ) -> HRESULT {
+        if uflags & CMF_DEFAULTONLY != 0 {
+            return HRESULT(0);
+        }
+        let items = plan(&Selection::inspect(&self.lock_paths()));
+        for (i, item) in items.iter().enumerate() {
+            let text: Vec<u16> = item.text().encode_utf16().chain(Some(0)).collect();
+            let flags = if item.enabled() { MF_STRING } else { MF_STRING | MF_GRAYED };
+            // SAFETY: text is NUL-terminated and outlives the call.
+            let r = unsafe {
+                InsertMenuW(
+                    hmenu,
+                    indexmenu + i as u32,
+                    MF_BYPOSITION | flags,
+                    (idcmdfirst + i as u32) as usize,
+                    PCWSTR(text.as_ptr()),
+                )
+            };
+            if r.is_err() {
+                return E_FAIL;
+            }
+            if let Some(bmp) = menu_bitmap() {
+                let mii = MENUITEMINFOW {
+                    cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                    fMask: MIIM_BITMAP,
+                    hbmpItem: bmp,
+                    ..Default::default()
+                };
+                // SAFETY: mii is fully initialized; item was just inserted at this position.
+                let _ = unsafe { SetMenuItemInfoW(hmenu, indexmenu + i as u32, true, &mii) };
+            }
+        }
+        let count = items.len() as i32;
+        if let Ok(mut slot) = self.items.lock() {
+            *slot = items;
+        }
+        HRESULT(count)
+    }
+
+    fn InvokeCommand(&self, pici: *const CMINVOKECOMMANDINFO) -> Result<()> {
+        // SAFETY: COM passes a valid, at least CMINVOKECOMMANDINFO-sized struct.
+        let info = unsafe { &*pici };
+        let items = self.lock_items();
+        let verb = info.lpVerb.0 as usize;
+        // HIWORD == 0 means an item offset; otherwise an ANSI verb string.
+        let item = if verb >> 16 == 0 {
+            items.get(verb & 0xFFFF).copied()
+        } else {
+            // SAFETY: lpVerb is a NUL-terminated ANSI string in that case.
+            let s = unsafe { info.lpVerb.to_string() }.unwrap_or_default();
+            items.iter().copied().find(|i| i.verb() == s)
+        };
+        let item = item.filter(|i| i.enabled()).ok_or(E_INVALIDARG)?;
+        let helper = Module::helper_path().ok_or(E_FAIL)?;
+        launch(&helper, item, &self.lock_paths()).map_err(|_| E_FAIL.into())
+    }
+
+    fn GetCommandString(
+        &self,
+        idcmd: usize,
+        utype: u32,
+        _reserved: *const u32,
+        pszname: PSTR,
+        cchmax: u32,
+    ) -> Result<()> {
+        let item = self.lock_items().get(idcmd).copied().ok_or(E_INVALIDARG)?;
+        let text = match utype {
+            GCS_VERBW => item.verb(),
+            GCS_HELPTEXTW => item.help(),
+            _ => return Err(E_INVALIDARG.into()),
+        };
+        let wide: Vec<u16> =
+            text.encode_utf16().take(cchmax.saturating_sub(1) as usize).chain(Some(0)).collect();
+        // SAFETY: for the *W types pszname is a u16 buffer of cchmax chars.
+        unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), pszname.0 as *mut u16, wide.len()) };
+        Ok(())
+    }
+}

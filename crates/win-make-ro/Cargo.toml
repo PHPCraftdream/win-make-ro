@@ -1,0 +1,23 @@
+[package]
+name = "win-make-ro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ro-core = { path = "../ro-core" }
+ro-register = { path = "../ro-register" }
+windows = { workspace = true, features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+] }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[build-dependencies]
+embed-resource = "3"
