@@ -21,6 +21,7 @@ fn sandbox() -> (tempfile::TempDir, Guard) {
     (dir, guard)
 }
 
+#[track_caller]
 fn assert_denied<T: std::fmt::Debug>(r: std::io::Result<T>) {
     match r {
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {}
