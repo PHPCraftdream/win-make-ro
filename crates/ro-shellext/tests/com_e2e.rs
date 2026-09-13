@@ -38,10 +38,11 @@ fn target_dir() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf()
 }
 
-/// The DLL launches `win-make-ro.exe` from its own directory; make sure it is there.
-fn ensure_helper_built() {
+/// `cargo test` alone does not emit the cdylib or the helper into target/;
+/// build both so the DLL can be loaded and can find `win-make-ro.exe`.
+fn ensure_built() {
     let st = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "win-make-ro"])
+        .args(["build", "-p", "win-make-ro", "-p", "ro-shellext"])
         .status()
         .expect("cargo build");
     assert!(st.success());
@@ -54,6 +55,7 @@ struct Dll {
 
 impl Dll {
     fn load() -> Self {
+        ensure_built();
         let path = target_dir().join("ro_shellext.dll");
         assert!(path.is_file(), "{} missing", path.display());
         let w = wide(path.as_os_str());
@@ -192,7 +194,6 @@ impl Drop for Guard {
 fn full_cycle_through_com() {
     // SAFETY: first COM call on this thread.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    ensure_helper_built();
     // SAFETY: test-only switch read by the DLL; set before any COM object exists.
     unsafe { std::env::set_var("WIN_MAKE_RO_SYNC", "1") };
 
