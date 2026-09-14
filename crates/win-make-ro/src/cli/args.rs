@@ -28,6 +28,7 @@ impl Args {
             Args { command, paths: Vec::new(), gui: false, no_elevate: false, paths_file: None };
         let mut opts_done = false;
         let mut want_paths_file = false;
+        let mut typed_paths = false;
         for a in it {
             if want_paths_file {
                 want_paths_file = false;
@@ -44,15 +45,29 @@ impl Args {
                 Some("--") if !opts_done => opts_done = true,
                 Some("--gui") if !opts_done => args.gui = true,
                 Some("--no-elevate") if !opts_done => args.no_elevate = true,
-                Some("--paths-from") if !opts_done => want_paths_file = true,
+                Some("--paths-from") if !opts_done => {
+                    if args.paths_file.is_some() {
+                        return Err("--paths-from can only be given once".into());
+                    }
+                    want_paths_file = true;
+                }
                 Some(s) if !opts_done && s.starts_with("--") => {
                     return Err(format!("unknown option: {s}"));
                 }
-                _ => args.paths.push(PathBuf::from(a)),
+                _ => {
+                    typed_paths = true;
+                    args.paths.push(PathBuf::from(a));
+                }
             }
         }
         if want_paths_file {
             return Err("--paths-from needs a file".into());
+        }
+        // The list is the whole selection: re-encoding for an elevated child
+        // passes the file on rather than the paths in it, so a target named
+        // beside it would be handed to nobody.
+        if args.paths_file.is_some() && typed_paths {
+            return Err("--paths-from cannot be combined with paths on the command line".into());
         }
         if command.takes_paths() && args.paths.is_empty() {
             return Err(format!("{}: at least one path required", command.as_str()));
@@ -126,6 +141,36 @@ mod tests {
         let a = parse(&["unlock", "--gui", "--no-elevate", "--", "C:\\a b", "--x"]).unwrap();
         let b = Args::parse(a.to_argv().into_iter()).unwrap();
         assert_eq!(a, b);
+    }
+
+    fn list_file(paths: &[&str]) -> PathBuf {
+        ro_core::write_paths_file(&paths.iter().map(PathBuf::from).collect::<Vec<_>>()).unwrap()
+    }
+
+    /// `--paths-from` carries the whole selection, and `to_argv` re-emits the
+    /// file rather than the paths in it. Anything named beside it would be
+    /// dropped on the way to an elevated child — and a second list would lose
+    /// everything but its own name — so both shapes are refused here instead.
+    #[test]
+    fn a_path_list_cannot_be_mixed_with_other_targets() {
+        let list = list_file(&[r"C:\listed.txt"]);
+        let name = list.to_str().expect("temp dir is plain text").to_string();
+        assert!(parse(&["lock", "--paths-from", &name, r"C:\extra.txt"]).is_err());
+        assert!(parse(&["lock", r"C:\extra.txt", "--paths-from", &name]).is_err());
+        assert!(parse(&["lock", "--paths-from", &name, "--paths-from", &name]).is_err());
+        assert!(parse(&["lock", "--paths-from", &name]).is_ok());
+        ro_core::remove_paths_file(&list);
+    }
+
+    /// What the child is handed has to name every target the parent was given.
+    #[test]
+    fn a_path_list_survives_re_encoding_for_a_child() {
+        let list = list_file(&[r"C:\one.txt", r"C:\two.txt"]);
+        let name = list.to_str().expect("temp dir is plain text").to_string();
+        let a = parse(&["lock", "--gui", "--paths-from", &name]).unwrap();
+        assert_eq!(a.paths.len(), 2);
+        assert_eq!(Args::parse(a.to_argv().into_iter()).unwrap(), a);
+        ro_core::remove_paths_file(&list);
     }
 
     /// A path that is not valid Unicode must survive parsing and re-encoding.

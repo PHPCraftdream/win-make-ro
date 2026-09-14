@@ -6,6 +6,15 @@ use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+use windows::Win32::Security::{
+    ACL, ACL_REVISION, AddAce, DACL_SECURITY_INFORMATION, InitializeAcl,
+    PROTECTED_DACL_SECURITY_INFORMATION,
+};
+use windows::Win32::Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ};
+use windows::core::PCWSTR;
+
 const EXE: &str = env!("CARGO_BIN_EXE_win-make-ro");
 
 struct Guard(PathBuf);
@@ -167,6 +176,35 @@ fn overlapping_targets_behave_the_same_in_either_order() {
     }
 }
 
+/// Windows lets the same item be spelled several ways, and putting the strings
+/// in order does not make those spellings meet. Naming a child before a parent
+/// that was written differently used to be refused outright: both ended up
+/// unlocked, but the run reported a failure that had not happened.
+#[test]
+fn overlapping_targets_survive_a_differently_spelled_parent() {
+    for spelling in ["upper case", "verbatim prefix"] {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        let child = parent.join("child.txt");
+        fs::write(&child, b"x").unwrap();
+        let _g = Guard(parent.clone());
+        assert!(run(&["lock", "--no-elevate"], &[&parent]).status.success());
+
+        // Both spellings sort ahead of the plain parent, so the child is tried
+        // first no matter which order the two are given in.
+        let odd = match spelling {
+            "upper case" => dir.path().join("PARENT").join("child.txt"),
+            _ => PathBuf::from(format!(r"\\?\{}", child.display())),
+        };
+        let o = run(&["unlock", "--no-elevate"], &[&odd, &parent]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success(), "{spelling}: exit {:?}: {err}", o.status.code());
+        assert!(err.is_empty(), "{spelling}: {err}");
+        fs::write(&child, b"y").expect("the child stayed locked");
+    }
+}
+
 /// A selection larger than a command line has to travel some other way. The
 /// helper reads the list from a file and removes it afterwards.
 #[test]
@@ -202,6 +240,86 @@ fn a_selection_too_large_for_a_command_line_goes_through_a_file() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     fs::write(&paths[0], b"y").unwrap();
+}
+
+/// One allow ACE of the smallest possible shape: header, mask and a SID with a
+/// single sub-authority, which is 20 bytes altogether.
+fn allow_ace(authority: u8, sub_authority: u32, mask: u32) -> [u8; 20] {
+    let mut ace = [0u8; 20];
+    ace[0] = 0; // ACCESS_ALLOWED_ACE_TYPE
+    ace[2..4].copy_from_slice(&20u16.to_le_bytes()); // AceSize
+    ace[4..8].copy_from_slice(&mask.to_le_bytes());
+    ace[8] = 1; // SID revision
+    ace[9] = 1; // one sub-authority
+    ace[15] = authority; // identifier authority, big-endian over six bytes
+    ace[16..20].copy_from_slice(&sub_authority.to_le_bytes());
+    ace
+}
+
+/// Fills the item's DACL to the 64 KB an ACL can hold: `Everyone: FullControl`
+/// followed by distinct read-only entries until no further ACE fits.
+///
+/// The SIDs have to differ — Windows may merge identical entries, and a DACL
+/// that quietly shrank would not exercise the limit at all. The DACL is written
+/// protected so nothing is inherited on top of it.
+fn fill_dacl_to_the_limit(path: &Path) {
+    const ACL_HEADER: usize = std::mem::size_of::<ACL>();
+    const ACE_BYTES: usize = 20;
+    let count = (usize::from(u16::MAX) - ACL_HEADER) / ACE_BYTES;
+    let bytes = ACL_HEADER + count * ACE_BYTES;
+
+    let mut buf = vec![0u32; bytes / 4];
+    let acl = buf.as_mut_ptr() as *mut ACL;
+    // SAFETY: buf is 4-byte aligned and exactly `bytes` long.
+    unsafe { InitializeAcl(acl, bytes as u32, ACL_REVISION) }.expect("init acl");
+    let mut entries = vec![allow_ace(1, 0, FILE_ALL_ACCESS.0)]; // S-1-1-0
+    entries.extend((1..count).map(|i| allow_ace(5, 10_000 + i as u32, FILE_GENERIC_READ.0)));
+    for ace in &entries {
+        // SAFETY: each ACE is a well-formed 20-byte ACCESS_ALLOWED_ACE and the
+        // buffer was sized for exactly this many of them.
+        unsafe { AddAce(acl, ACL_REVISION, u32::MAX, ace.as_ptr() as *const _, ACE_BYTES as u32) }
+            .expect("add ace");
+    }
+
+    let wide = ro_core::wide_path(path).unwrap();
+    // SAFETY: wide is NUL-terminated and acl is a valid, initialised ACL.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl),
+            None,
+        )
+    };
+    assert_eq!(rc, ERROR_SUCCESS, "write a full-size DACL");
+}
+
+/// An ACL stores its own size in a `WORD`, so a DACL can reach 64 KB and no
+/// further. One filled to the brim used to make the helper panic while sizing
+/// the buffer for the lock ACE, which took the whole run down: every target
+/// after it was left alone without a word.
+#[test]
+fn a_dacl_at_the_size_limit_is_reported_and_the_next_target_still_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    // `ordered` sorts the targets, so the names decide which one comes first.
+    let full = dir.path().join("a-full-dacl.txt");
+    let next = dir.path().join("z-next.txt");
+    fs::write(&full, b"x").unwrap();
+    fs::write(&next, b"x").unwrap();
+    let _g = Guard(next.clone());
+    fill_dacl_to_the_limit(&full);
+
+    let o = run(&["lock", "--no-elevate"], &[&full, &next]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "exit code; stderr: {err}");
+    assert!(err.contains("64 KB"), "{err}");
+    // The ACE never went in, so the file is exactly as it was.
+    fs::write(&full, b"y").expect("the item was changed after all");
+    // And the target behind it was still processed.
+    assert!(fs::write(&next, b"y").is_err(), "the run stopped at the first failure");
 }
 
 /// The list is UTF-16, so a name that is not valid Unicode survives it.

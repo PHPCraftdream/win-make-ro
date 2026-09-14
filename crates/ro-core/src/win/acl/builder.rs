@@ -5,11 +5,16 @@ use windows::Win32::Security::{
     OBJECT_INHERIT_ACE,
 };
 
-use super::{AceRef, DENY_TYPE};
+use super::{AceRef, DENY_TYPE, aces};
 use crate::types::LOCK_MASK;
 use crate::win::Sid;
 
 const MAXDWORD: u32 = u32::MAX;
+
+/// The most an ACL can hold: `ACL::AclSize` is a `WORD`, and the buffer is
+/// allocated in whole 4-byte words, so the usable maximum rounds down to 65 532.
+/// See <https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-acl>.
+const MAX_ACL_BYTES: usize = (u16::MAX as usize) & !3;
 
 /// Bytes an ACE for `sid` occupies: header + mask + the SID itself.
 pub fn ace_size(sid: &Sid) -> usize {
@@ -23,21 +28,36 @@ pub struct AclBuilder {
 }
 
 impl AclBuilder {
-    /// Capacity = old ACL size + `extra_bytes`.
-    pub fn new(old: *const ACL, extra_bytes: usize) -> Self {
+    /// Capacity = the bytes the old ACEs actually occupy + `extra_bytes`.
+    ///
+    /// The old `AclSize` counts free space in the buffer Windows handed us as
+    /// well, so it is not what the copy needs. How large the source DACL is
+    /// belongs to the file system, not to us: an ACL past the limit is an
+    /// ordinary refusal, not a broken invariant.
+    pub fn new(old: *const ACL, extra_bytes: usize) -> io::Result<Self> {
         let (in_use, revision) = if old.is_null() {
             (std::mem::size_of::<ACL>(), ACL_REVISION)
         } else {
             // SAFETY: valid ACL.
             let a = unsafe { &*old };
-            (usize::from(a.AclSize), ACE_REVISION(u32::from(a.AclRevision)))
+            let used: usize =
+                aces(old).iter().map(|e| usize::from(e.header().AceSize)).sum::<usize>()
+                    + std::mem::size_of::<ACL>();
+            (used, ACE_REVISION(u32::from(a.AclRevision)))
         };
-        let words = (in_use + extra_bytes).div_ceil(4);
+        let needed = in_use.saturating_add(extra_bytes);
+        if needed > MAX_ACL_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the access control list would grow past the 64 KB Windows allows",
+            ));
+        }
+        let words = needed.div_ceil(4);
         let mut buf = vec![0u32; words];
         // SAFETY: buffer is 4-byte aligned and `words*4` bytes long.
         unsafe { InitializeAcl(buf.as_mut_ptr() as *mut ACL, (words * 4) as u32, revision) }
-            .expect("invariant: fresh buffer of valid size");
-        Self { buf, revision }
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+        Ok(Self { buf, revision })
     }
 
     pub fn acl(&mut self) -> *mut ACL {

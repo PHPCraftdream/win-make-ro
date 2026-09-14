@@ -24,7 +24,13 @@ pub fn write_paths_file(paths: &[PathBuf]) -> io::Result<PathBuf> {
         let path = dir.join(name(attempt));
         match File::create_new(&path) {
             Ok(mut f) => {
-                f.write_all(&bytes)?;
+                // A half-written list is of no use to anyone and nobody else
+                // knows its name yet, so it does not outlive the failure.
+                if let Err(e) = f.write_all(&bytes) {
+                    drop(f);
+                    remove_paths_file(&path);
+                    return Err(e);
+                }
                 return Ok(path);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,

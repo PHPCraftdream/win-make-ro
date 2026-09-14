@@ -38,7 +38,7 @@ pub fn unlock(path: &Path) -> Result<bool> {
 }
 
 fn write_kept(path: &Path, wide: &[u16], dacl: &Dacl, keep: &[AceRef]) -> Result<()> {
-    let mut b = AclBuilder::new(dacl.acl, 0);
+    let mut b = AclBuilder::new(dacl.acl, 0).map_err(|e| Error::os(path, e))?;
     for a in keep {
         b.push(*a).map_err(|e| Error::os(path, e))?;
     }

@@ -27,8 +27,8 @@ pub fn lock(path: &Path) -> Result<bool> {
     if old.iter().any(|a| !a.inherited() && a.is_lock(&everyone)) {
         return Ok(false);
     }
-    let mut b = AclBuilder::new(dacl.acl, ace_size(&everyone));
     let io = |e| Error::os(path, e);
+    let mut b = AclBuilder::new(dacl.acl, ace_size(&everyone)).map_err(io)?;
     // Canonical order: explicit denies first, so the lock goes to the front.
     b.push_lock(&everyone, meta.is_dir()).map_err(io)?;
     for a in old.iter() {

@@ -36,6 +36,9 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
   off rather than granting a set of rights, no ACL reproduces that, and no
   later unlock could tell a reconstructed one from a deliberate
   `Everyone: FullControl`. Such an item is reported and left untouched.
+- An ACL stores its own size in a 16-bit field, so a DACL stops at 64 KB. An
+  item whose DACL has no room left for one more entry is reported and left
+  alone; the rest of the selection is still processed.
 - Items that are locked through a parent show a disabled entry *Read only
   (inherited from parent folder)*; unlock the parent instead. Removing an
   item's own ACE while a parent's lock still applies is refused, since it

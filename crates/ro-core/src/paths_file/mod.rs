@@ -7,9 +7,11 @@
 //! Unicode intact — the very reason the command line is built in UTF-16.
 
 mod budget;
+mod guard;
 mod read;
 mod write;
 
 pub use budget::{COMMAND_LINE_BUDGET, fits_command_line};
+pub use guard::PathsFile;
 pub use read::read_paths_file;
 pub use write::{remove_paths_file, write_paths_file};
