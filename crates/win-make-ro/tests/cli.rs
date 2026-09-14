@@ -99,7 +99,13 @@ fn missing_path_exits_1_and_status_reports_error() {
 fn usage_errors_exit_2() {
     let o = Command::new(EXE).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("usage:"));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("usage:"));
+    // npm hides what its scripts print, so this is where a user installed
+    // through npm can still find the removal order.
+    let unregister = err.find("win-make-ro uninstall").expect("no unregister hint");
+    let remove = err.find("npm uninstall -g win-make-ro").expect("no npm hint");
+    assert!(unregister < remove, "unregistering has to come first");
     let o = Command::new(EXE).args(["lock", "--bogus", "x"]).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
 }

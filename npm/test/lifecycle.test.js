@@ -54,6 +54,18 @@ test("publishes the binaries and nothing private", () => {
   assert.ok(!pkg.files.includes("test/"), "the tests are not part of the package");
 });
 
+// npm hides the output of scripts that succeed, so the install-time notice
+// cannot be the only place this is written down.
+test("the README documents the removal order", () => {
+  const readme = fs.readFileSync(path.join(root, "..", "README.md"), "utf8");
+  const unregister = readme.indexOf("win-make-ro uninstall");
+  const remove = readme.indexOf("npm uninstall -g win-make-ro");
+  assert.ok(unregister !== -1, "the README does not mention `win-make-ro uninstall`");
+  assert.ok(remove !== -1, "the README does not mention `npm uninstall -g win-make-ro`");
+  assert.ok(unregister < remove, "unregistering has to be documented first");
+  assert.match(readme, /--foreground-scripts/, "the README does not say how to see the notice");
+});
+
 // A failed registration must never fail `npm install`.
 test("postinstall survives a missing executable", () => {
   const result = spawnSync(process.execPath, [path.join(root, "scripts", "postinstall.js")], {

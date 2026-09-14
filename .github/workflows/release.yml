@@ -42,6 +42,12 @@ jobs:
           Copy-Item target/release/win-make-ro.exe "dist/$name/"
           Copy-Item target/release/ro_shellext.dll "dist/$name/"
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          # A zip records each entry's timestamp, so rebuilding the same bytes
+          # at a different moment yields a different archive and a different
+          # hash. Pinning the stamps to the tagged commit keeps the archive
+          # reproducible and verifiable.
+          $stamp = [datetime]::Parse((git log -1 --format=%cI)).ToUniversalTime()
+          Get-ChildItem "dist/$name" | ForEach-Object { $_.LastWriteTimeUtc = $stamp }
           Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
@@ -71,14 +77,30 @@ jobs:
           npm cannot run scripts on uninstall, so remove the registration with
           ``win-make-ro uninstall`` before ``npm uninstall -g win-make-ro``.
           "@
-          gh release view $env:TAG 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "release $env:TAG exists; refreshing its assets"
-            gh release upload $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" --clobber
-          } else {
+          $assetName = Split-Path $env:ARCHIVE -Leaf
+          $existing = gh release view $env:TAG --json assets 2>$null
+          if ($LASTEXITCODE -ne 0) {
             gh release create $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" `
               --title $env:TAG --notes $notes
+            exit 0
           }
+          $assets = @(($existing | ConvertFrom-Json).assets | ForEach-Object { $_.name })
+          if ($assets -notcontains $assetName) {
+            Write-Host "release $env:TAG exists but has no archive; uploading this build"
+            gh release upload $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256"
+            exit 0
+          }
+          # Replacing a published archive would invalidate every manifest and
+          # release note that already quotes its hash, so the published bytes
+          # win and the rest of the run follows their checksum.
+          New-Item -ItemType Directory -Path dist/published -Force | Out-Null
+          gh release download $env:TAG --pattern $assetName --dir dist/published --clobber
+          $hash = (Get-FileHash "dist/published/$assetName" -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:SHA256) {
+            Write-Host "this build differs from the published archive; keeping the published one"
+          }
+          Write-Host "reusing the archive already on release $env:TAG ($hash)"
+          "SHA256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -121,6 +143,15 @@ jobs:
             git fetch --quiet origin $branch
             git checkout --quiet -B $branch "origin/$branch"
             $m = Get-Content $path -Raw | ConvertFrom-Json
+            # Re-running an older tag must not walk the manifest backwards.
+            try {
+              if ([version]$m.version -gt [version]$env:VERSION) {
+                Write-Host "the manifest is at $($m.version); not replacing it with $env:VERSION"
+                exit 0
+              }
+            } catch {
+              Write-Host "cannot compare $($m.version) with $env:VERSION; updating anyway"
+            }
             $m.version = $env:VERSION
             $m.architecture."64bit".url =
               "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"

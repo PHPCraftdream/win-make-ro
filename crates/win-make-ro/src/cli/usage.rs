@@ -8,4 +8,7 @@ usage:
 
   --gui         report errors in a message box instead of stderr
   --no-elevate  never re-launch elevated on access denied
-  --            end of options";
+  --            end of options
+
+note: npm runs no scripts on uninstall, so if this came from npm, run
+      `win-make-ro uninstall` before `npm uninstall -g win-make-ro`.";

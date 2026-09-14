@@ -84,7 +84,10 @@ you would rather unpack it yourself and run `win-make-ro.exe install`.
 
 Scoop unregisters the context menu for you. npm cannot: since version 7 it
 runs no scripts on uninstall, so unregister first, while the executable is
-still there.
+still there. npm also hides the output of scripts that succeed, so the
+reminder the package prints on install is only visible with
+`npm install -g win-make-ro --foreground-scripts`; `win-make-ro` with no
+arguments repeats it.
 
 ```
 win-make-ro uninstall
