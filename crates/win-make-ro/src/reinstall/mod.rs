@@ -6,10 +6,11 @@
 //! and the old file waits under another one until Explorer has been restarted.
 
 mod binaries;
-mod elevated;
 mod explorer;
+mod outcome;
 mod run;
 mod swap;
 mod sweep;
 
+pub use outcome::Restart;
 pub use run::reinstall;

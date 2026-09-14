@@ -20,20 +20,23 @@ const REMOVAL_NOTICE =
   "npm cannot do the first step for you. If the package is already gone, see\n" +
   "the Removal section of the README for the registry keys to delete.";
 
-/** What postinstall asks the executable to do, in order, stopping at the first
- * one that works.
+/** What postinstall asks the executable to do after a global install.
  *
- * `reinstall` first because npm may have just rewritten the DLL that a running
- * Explorer still has mapped: registering alone would leave the old code in
- * place until the user next logs out. It renames the superseded copy aside and
- * restarts Explorer, and on a machine with nothing registered yet it is an
- * ordinary install that leaves the desktop alone.
+ * `reinstall` rather than `install`, because npm has just rewritten the DLL
+ * that a running Explorer may still have mapped: registering alone would leave
+ * the old code in use until the user next logs out. With nothing registered yet
+ * it is an ordinary install and leaves the desktop alone.
  *
- * `install` second because `reinstall` refuses to run with administrator
- * rights — the restarted Explorer would keep them for the whole session — and
- * `npm install -g` from an elevated shell is ordinary on Windows. Registering
- * still works there; only the swap and the restart are left to the user. */
-const REGISTER_COMMANDS = ["reinstall", "install"];
+ * `--here` says out loud that this registers the copy npm just unpacked. It is
+ * what passing neither `--here` nor `--to` already means, and saying it means
+ * a future change of default cannot silently point this at somebody else's
+ * installation directory.
+ *
+ * No fallback to plain `install`: an elevated shell — ordinary enough for
+ * `npm install -g` on Windows — is handled inside the executable, which
+ * registers the pair and reports that the restart was skipped rather than
+ * failing. What is left over really is failure. */
+const REGISTER_ARGV = ["reinstall", "--here"];
 
 function exe() {
   return path.join(VENDOR, "win-make-ro.exe");
@@ -53,7 +56,7 @@ function shouldRegister() {
 
 module.exports = {
   VENDOR,
-  REGISTER_COMMANDS,
+  REGISTER_ARGV,
   REMOVAL_NOTICE,
   exe,
   isWindows,

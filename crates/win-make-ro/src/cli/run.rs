@@ -1,5 +1,6 @@
 use super::{Args, Command, EXIT_ERRORS, EXIT_OK};
 use crate::ops::{apply, elevate, report_errors, status};
+use crate::reinstall::Restart;
 
 pub fn run(args: Args) -> i32 {
     let code = dispatch(&args);
@@ -17,7 +18,7 @@ fn dispatch(args: &Args) -> i32 {
     match args.command {
         Command::Status => status(&args.paths),
         Command::Install => registry(args.gui, install_here()),
-        Command::Reinstall => reinstall(args.gui),
+        Command::Reinstall => reinstall(args),
         Command::Uninstall => {
             registry(args.gui, ro_register::uninstall().map_err(|e| e.to_string()))
         }
@@ -36,23 +37,34 @@ fn dispatch(args: &Args) -> i32 {
     }
 }
 
-/// Reports where the binaries went, because `reinstall` may have chosen a
-/// directory the caller did not name: the one the registration points at.
-fn reinstall(gui: bool) -> i32 {
-    match crate::reinstall::reinstall() {
-        Ok((dir, restarted, left_behind)) => {
-            let explorer =
-                if restarted { "Explorer restarted" } else { "nothing was loaded to replace" };
-            println!("installed into {} ({explorer})", dir.display());
-            for path in left_behind {
-                eprintln!("{}: superseded copy still in use, left for next time", path.display());
-            }
-            EXIT_OK
-        }
+/// Says where the binaries are registered from and what became of Explorer,
+/// separately: a restart that did not happen leaves the installation in place,
+/// and reporting one failure as the other would be a lie in either direction.
+fn reinstall(args: &Args) -> i32 {
+    let summary = match crate::reinstall::reinstall(args.to.as_deref()) {
+        Ok(s) => s,
         Err(msg) => {
-            crate::ops::show_error(gui, &msg);
+            crate::ops::show_error(args.gui, &msg);
+            return EXIT_ERRORS;
+        }
+    };
+    println!("registered {} ({})", summary.to.display(), summary.restart.describe());
+    for path in &summary.left_behind {
+        eprintln!("{}: superseded copy still in use, left for next time", path.display());
+    }
+    match &summary.restart {
+        Restart::Failed(why) => {
+            crate::ops::show_error(
+                args.gui,
+                &format!(
+                    "the installation in {} is registered, but Explorer still runs the old \
+                     copy: {why}",
+                    summary.to.display()
+                ),
+            );
             EXIT_ERRORS
         }
+        _ => EXIT_OK,
     }
 }
 

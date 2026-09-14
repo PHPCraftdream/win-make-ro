@@ -84,12 +84,14 @@ The npm package ships the binaries and is marked `win32`/`x64`; a project-local
 install deliberately skips registration, so run `npx win-make-ro install` for
 that case. Set `WIN_MAKE_RO_SKIP_REGISTER=1` to suppress it entirely.
 
-A global install runs `reinstall` (see below), so **upgrading restarts
+A global install runs `reinstall --here` (see below), so **upgrading restarts
 Explorer**: npm has just rewritten the DLL the running one still has mapped,
-and only a restart makes the new code the one in use. A first install has
-nothing loaded and leaves the desktop alone. From an elevated shell the restart
-is skipped — Explorer would keep the elevated token — and the install says so;
-run `win-make-ro reinstall` yourself from an ordinary window.
+and only a restart makes the new code the one in use. `--here` registers the
+copy npm unpacked and touches no other directory. Nothing was registered
+before? Then nothing is loaded to replace, and the desktop is left alone. From
+an elevated shell the restart is skipped — Explorer would keep the elevated
+token — and the install says so; run `win-make-ro reinstall --here` yourself
+from an ordinary window.
 
 Upgrading while Explorer holds the DLL can also fail inside npm itself, before
 any script of ours runs, because npm overwrites the file rather than renaming
@@ -141,22 +143,35 @@ so a rebuilt DLL cannot simply be copied over the installed one. `reinstall`
 does the whole exchange:
 
 ```
-target\release\win-make-ro.exe reinstall
+target\release\win-make-ro.exe reinstall --to dist
 ```
 
-It takes the two binaries beside it, renames the installed pair aside — a
-rename moves the directory entry and leaves the running Explorer with the image
-it already has — copies the new pair into their place, re-registers, asks
-Explorer to close, starts it again and then deletes the renamed files. Anything
-that was still in use is swept by the next run. With nothing registered yet it
-is an ordinary install and leaves Explorer alone — there is nothing loaded to
-replace — and it refuses to run elevated, since Explorer would inherit the
-elevated token for the rest of the session.
+It writes both new binaries into `dist\` under temporary names, renames the
+installed pair aside — a rename moves the directory entry and leaves the
+running Explorer with the image it already has — puts the new pair in their
+place, registers it, asks Explorer to close, starts it again and then deletes
+the renamed copies. Anything still in use is swept by the next run.
 
-`reinstall` refreshes the installation *at the registered path*. Scoop gives
-each version a directory of its own, so there is nothing to rename there and
-its manifest uses `install`; restart Explorer afterwards to drop the copy it
-still has mapped.
+```
+dist\win-make-ro.exe reinstall            # same as --here
+```
+
+Without `--to`, `reinstall` copies nothing: it registers the pair beside the
+executable where it already is and restarts Explorer. That is the difference
+that matters, and why the destination is never guessed — an earlier version
+took it from whatever was registered, so an `npm install -g` on a machine
+carrying a Scoop or hand-made installation wrote its binaries into that other
+directory. Name the directory or get your own.
+
+Explorer is restarted only when something was registered before, since a first
+install has nothing loaded to replace, and never from an elevated process,
+which would hand the new shell its token for the rest of the session — there it
+registers and says the restart was skipped. A restart that was asked for and
+failed is reported as itself; the installation is registered either way.
+
+Scoop gives each version a directory of its own, so there is nothing to rename
+there and its manifest uses `install`; restart Explorer afterwards to drop the
+copy it still has mapped.
 
 ## CLI
 
@@ -164,7 +179,8 @@ still has mapped.
 win-make-ro lock   [--gui] [--no-elevate] -- <path>...
 win-make-ro unlock [--gui] [--no-elevate] -- <path>...
 win-make-ro status -- <path>...          # prints "<unlocked|locked|inherited>\t<path>"
-win-make-ro install | reinstall | uninstall
+win-make-ro install | uninstall
+win-make-ro reinstall [--here | --to <dir>]
 ```
 
 Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with

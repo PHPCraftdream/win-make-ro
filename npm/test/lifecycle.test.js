@@ -7,10 +7,11 @@ const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const root = path.join(__dirname, "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const { REGISTER_COMMANDS, REMOVAL_NOTICE } = require("../scripts/paths.js");
+const { REGISTER_ARGV, REMOVAL_NOTICE } = require("../scripts/paths.js");
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -77,14 +78,98 @@ test("the README documents the removal order", () => {
   assert.match(readme, /--foreground-scripts/, "the README does not say how to see the notice");
 });
 
+/** Runs the real postinstall.js with the operating system replaced.
+ *
+ * The script and paths.js are the ones that ship; only what they reach for —
+ * spawning, the file system, the platform, the environment and the console —
+ * is substituted. Nothing spawns the packaged executable, which would register
+ * the extension and restart the tester's Explorer. */
+function runPostinstall({
+  platform = "win32",
+  env = {},
+  exeExists = true,
+  spawn = () => ({ status: 0 }),
+}) {
+  const calls = [];
+  const out = [];
+  const errs = [];
+  const scripts = path.join(root, "scripts");
+  const load = (file) => {
+    const module = { exports: {} };
+    const context = vm.createContext({
+      module,
+      exports: module.exports,
+      __dirname: scripts,
+      process: { platform, env },
+      console: { log: (m) => out.push(String(m)), error: (m) => errs.push(String(m)) },
+      require: (id) => {
+        if (id === "./paths.js") return load("paths.js");
+        if (id === "node:path") return path;
+        if (id === "node:fs") return { existsSync: () => exeExists };
+        if (id === "node:child_process") {
+          return {
+            spawnSync: (file, argv) => {
+              calls.push({ file, argv });
+              return spawn(file, argv);
+            },
+          };
+        }
+        throw new Error(`postinstall reached for an unexpected module: ${id}`);
+      },
+    });
+    vm.runInContext(fs.readFileSync(path.join(scripts, file), "utf8"), context, {
+      filename: file,
+    });
+    return module.exports;
+  };
+  load("postinstall.js");
+  return { calls, out: out.join("\n"), errs: errs.join("\n") };
+}
+
 // An upgrade rewrites the DLL a running Explorer still has mapped, so plain
-// registration would leave the old code in place until the next logout.
-// `reinstall` swaps it and restarts Explorer; `install` is only the fallback
-// for an elevated shell, where restarting Explorer is not allowed.
-test("a global install asks for a reinstall before a plain install", () => {
-  assert.deepEqual(REGISTER_COMMANDS, ["reinstall", "install"]);
-  const source = fs.readFileSync(path.join(root, "scripts", "postinstall.js"), "utf8");
-  assert.match(source, /REGISTER_COMMANDS\.find\(run\)/, "the order above has to be the one used");
+// registration would leave the old code in use until the next logout. And the
+// destination has to be said out loud: a `reinstall` that ever went back to
+// inferring one could point npm's files at a Scoop or hand-made installation.
+test("a global install registers this copy and asks for the restart", () => {
+  assert.deepEqual(REGISTER_ARGV, ["reinstall", "--here"]);
+  const { calls, errs } = runPostinstall({ env: { npm_config_global: "true" } });
+  assert.equal(calls.length, 1, "the executable was not asked to do anything");
+  // Copied out of the script's own realm, where Array is a different class.
+  assert.deepEqual(Array.from(calls[0].argv), ["reinstall", "--here"]);
+  assert.match(calls[0].file, /win-make-ro\.exe$/);
+  assert.equal(errs, "", "a successful registration has nothing to complain about");
+});
+
+// The executable reports a skipped restart as success, so a non-zero exit is
+// real failure and the advice has to be something the user can act on.
+test("a registration that fails says what to run, and never throws", () => {
+  for (const spawn of [() => ({ status: 1 }), () => ({ error: new Error("ENOENT") })]) {
+    const { calls, errs } = runPostinstall({ env: { npm_config_global: "true" }, spawn });
+    assert.equal(calls.length, 1);
+    assert.match(errs, /reinstall --here/);
+    assert.match(errs, /administrator rights/);
+  }
+});
+
+test("nothing is spawned when it must not be", () => {
+  const cases = [
+    ["a project-local install", { env: {} }, /npx win-make-ro install/],
+    ["an explicit opt-out", { env: { npm_config_global: "true", WIN_MAKE_RO_SKIP_REGISTER: "1" } }],
+    ["a missing executable", { env: { npm_config_global: "true" }, exeExists: false }],
+    ["another platform", { platform: "linux", env: { npm_config_global: "true" } }],
+  ];
+  for (const [name, options, expected] of cases) {
+    const { calls, out, errs } = runPostinstall(options);
+    assert.equal(calls.length, 0, `${name} reached for the executable`);
+    if (expected) assert.match(out + errs, expected, name);
+  }
+});
+
+test("the removal notice is printed on Windows and only there", () => {
+  const windows = runPostinstall({ env: { npm_config_global: "true" } });
+  assert.match(windows.out, /npm uninstall -g win-make-ro/);
+  const other = runPostinstall({ platform: "linux", env: { npm_config_global: "true" } });
+  assert.doesNotMatch(other.out, /npm uninstall -g win-make-ro/);
 });
 
 // A failed registration must never fail `npm install`.

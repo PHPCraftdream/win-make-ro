@@ -4,18 +4,12 @@
 // allowed to fail the install: a missing registration is recoverable with one
 // command, an aborted `npm install -g` is not.
 //
-// Why it asks for a reinstall first, and what the fallback is for, is written
-// down beside REGISTER_COMMANDS.
+// What it asks the executable to do, and why, is written down beside
+// REGISTER_ARGV.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const {
-  REGISTER_COMMANDS,
-  REMOVAL_NOTICE,
-  exe,
-  isWindows,
-  shouldRegister,
-} = require("./paths.js");
+const { REGISTER_ARGV, REMOVAL_NOTICE, exe, isWindows, shouldRegister } = require("./paths.js");
 
 function main() {
   if (!isWindows()) {
@@ -32,29 +26,16 @@ function main() {
     );
     return;
   }
-
-  switch (REGISTER_COMMANDS.find(run)) {
-    case "reinstall":
-      console.log("win-make-ro: context menu registered for the current user.");
-      return;
-    case "install":
-      console.log(
-        "win-make-ro: context menu registered, but Explorer was not restarted.\n" +
-          "             If it is still running an older copy, run `win-make-ro reinstall`\n" +
-          "             from a window without administrator rights."
-      );
-      return;
-    default:
-      console.error(
-        "win-make-ro: could not register the context menu.\n" +
-          "             Run `win-make-ro install` to retry."
-      );
+  // The executable reports what it did on its own, including whether Explorer
+  // was restarted, so there is nothing to add on success.
+  const result = spawnSync(exe(), REGISTER_ARGV, { stdio: "inherit" });
+  if (result.error || result.status !== 0) {
+    console.error(
+      "win-make-ro: the context menu was not fully set up.\n" +
+        "             Run `win-make-ro reinstall --here` from a window without\n" +
+        "             administrator rights, or `win-make-ro install` to register only."
+    );
   }
-}
-
-function run(command) {
-  const result = spawnSync(exe(), [command], { stdio: "inherit" });
-  return !result.error && result.status === 0;
 }
 
 main();

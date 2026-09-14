@@ -114,6 +114,7 @@ mod tests {
             no_elevate: false,
             paths_file: None,
             consume_paths_file: false,
+            to: None,
         }
     }
 

@@ -4,7 +4,7 @@ usage:
   win-make-ro unlock [--gui] [--no-elevate] <path>...   remove our read only (recursive)
   win-make-ro status <path>...                          print lock state per path
   win-make-ro install                                   register the context menu (current user)
-  win-make-ro reinstall                                 replace the installed copy, restart Explorer
+  win-make-ro reinstall [--here | --to <dir>]           register this copy, restart Explorer
   win-make-ro uninstall                                 remove the context menu
 
   --gui                report errors in a message box instead of stderr
@@ -17,6 +17,12 @@ usage:
   --consume-paths-from <file>
                        the same, but the file is removed once read. The shell
                        extension hands its own one-shot list over this way.
+  --here               reinstall: register the pair beside this executable
+                       where it already is. The default, and no other
+                       directory is touched.
+  --to <dir>           reinstall: copy the pair into <dir> first, renaming the
+                       superseded one aside so a running Explorer keeps the
+                       copy it has. Name a directory you own.
   --                   end of options
 
 note: npm runs no scripts on uninstall, so if this came from npm, run

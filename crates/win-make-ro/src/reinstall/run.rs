@@ -1,132 +1,103 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::binaries::BINARIES;
-use super::elevated::elevated;
+use super::binaries::Binaries;
 use super::explorer;
+use super::outcome::{Restart, Summary};
 use super::swap::swap;
 use super::sweep::sweep;
 
-/// Installs the binaries sitting next to this executable over the registered
-/// ones, then restarts Explorer.
+/// Makes an installation current and restarts Explorer so it is the one in use.
 ///
-/// Explorer keeps `ro_shellext.dll` mapped for as long as it runs, so a plain
-/// copy over it is refused by Windows and an install that only re-registers
-/// would leave the old code in place. The superseded files are renamed aside
-/// instead — a rename touches the directory entry, not the mapping — and are
-/// deleted once Explorer has closed.
+/// `to` names a directory to install *into*, which is the only way the binaries
+/// beside this executable are copied anywhere: the superseded pair is renamed
+/// aside — a rename moves the directory entry, not the mapping a running
+/// Explorer holds — and deleted once Explorer has gone. Without it the pair
+/// beside this executable is simply registered where it already is.
 ///
-/// Explorer is restarted only when something was registered before this ran.
-/// A first install has nothing loaded to replace, and closing the desktop to
-/// prove it would be rude — which is what lets an `npm install -g` call this
-/// unconditionally and still leave a fresh machine alone.
+/// That distinction is the whole point. An earlier version took the destination
+/// from whatever was registered, so an `npm install -g` on a machine carrying a
+/// Scoop or hand-made installation wrote its binaries into that other
+/// directory and left the registration pointing there — where the other
+/// installer would later delete them.
 ///
-/// Returns where the binaries went, whether Explorer was restarted, and any
-/// superseded copy that still would not go, which the next run sweeps.
-pub fn reinstall() -> Result<(PathBuf, bool, Vec<PathBuf>), String> {
-    // Explorer would inherit this process's token, and an elevated desktop
-    // hands administrator rights to everything started from it afterwards.
-    // Nothing here needs elevation: the registration is per-user.
-    if elevated() {
-        return Err("reinstall must run without administrator rights, or the \
-                    restarted Explorer would keep them for the whole session"
-            .into());
-    }
-
+/// Three decisions, kept apart: where to install, whether a restart is worth
+/// asking for, and whether it may be carried out. Explorer is restarted only if
+/// something was registered before, since a first install has nothing loaded to
+/// replace, and never from an elevated process, which would hand the new shell
+/// its token for the session.
+pub fn reinstall(to: Option<&Path>) -> Result<Summary, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate own executable: {e}"))?;
     let from = exe.parent().ok_or("the executable has no directory to install from")?.to_path_buf();
-    // Checked here rather than left to `swap`, which is skipped when the
-    // installation is already in this directory: registering a DLL that is not
-    // there would leave Explorer loading nothing.
-    for name in BINARIES {
+    for name in Binaries::NAMES {
         let path = from.join(name);
         if !path.is_file() {
             return Err(format!("{} is not there to install", path.display()));
         }
     }
-    let registered = ro_register::is_installed();
-    let was_registered = registered.is_some();
-    let to = destination(registered, &from);
+    let was_registered = ro_register::is_installed().is_some();
 
-    // Anything an interrupted run left behind goes first, while the names are
-    // free and before new ones are added to the pile.
-    sweep(&to);
-    if !same_directory(&from, &to) {
-        swap(&from, &to).map_err(|e| format!("cannot install into {}: {e}", to.display()))?;
-    }
-    ro_register::install(&to.join(BINARIES[1]))
+    let (to, mut superseded) = match to {
+        None => (from, Vec::new()),
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("cannot use {} as a destination: {e}", dir.display()))?;
+            // Anything an interrupted run left behind goes first, while the
+            // names are free and before new ones join the pile.
+            sweep(dir, &[]);
+            let made = swap(&from, dir)
+                .map_err(|e| format!("cannot install into {}: {e}", dir.display()))?;
+            (dir.to_path_buf(), made)
+        }
+    };
+
+    ro_register::install(&to.join(Binaries::NAMES[1]))
         .map_err(|e| format!("cannot register {}: {e}", to.display()))?;
 
-    // Whether the files here changed is not the question: a package manager
-    // may have rewritten them in place before calling this, and Explorer would
+    // Whether files changed here is not the question: a package manager may
+    // have rewritten them in place before calling this, and Explorer would
     // still be running the image it mapped earlier.
-    if !was_registered {
-        return Ok((to, false, Vec::new()));
+    let restart = if was_registered { explorer::restart() } else { Restart::NotRequested };
+    if restart != Restart::Restarted {
+        // The old copies are still mapped, so they stay for the next run.
+        return Ok(Summary { to, restart, left_behind: superseded });
     }
-    explorer::restart().map_err(|e| {
-        format!("{e}. The binaries are in place in {}; restart Explorer to load them", to.display())
-    })?;
-    Ok((to.clone(), true, sweep(&to)))
-}
-
-/// Where an installation already lives, or the source directory when there is
-/// none — which makes the first `reinstall` an ordinary install.
-///
-/// A registration pointing somewhere that no longer exists is ignored rather
-/// than followed: writing binaries into a directory that has been removed
-/// would create a copy nothing knows about.
-fn destination(registered: Option<PathBuf>, from: &Path) -> PathBuf {
-    registered
-        .as_deref()
-        .and_then(Path::parent)
-        .filter(|dir| dir.is_dir())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| from.to_path_buf())
-}
-
-/// Whether both names lead to the same directory, so nothing is copied over
-/// itself. Compared after resolving, since the registry and `current_exe` need
-/// not spell a path the same way.
-fn same_directory(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
+    superseded = sweep(&to, &superseded);
+    Ok(Summary { to, restart, left_behind: superseded })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The paths a foreign installation would sit at are not even looked up
+    /// when no destination is named, so they cannot be written to.
     #[test]
-    fn an_existing_registration_decides_where_the_binaries_go() {
+    fn without_a_destination_nothing_is_copied_anywhere() {
         let dir = tempfile::tempdir().unwrap();
-        let installed = dir.path().join("ro_shellext.dll");
-        std::fs::write(&installed, b"x").unwrap();
-        let from = Path::new(r"C:\somewhere\else");
-        assert_eq!(destination(Some(installed), from), dir.path());
+        let foreign = dir.path().join("scoop-apps-win-make-ro-1.0.0");
+        std::fs::create_dir(&foreign).unwrap();
+        for name in Binaries::NAMES {
+            std::fs::write(foreign.join(name), b"scoop").unwrap();
+        }
+
+        // `reinstall(None)` installs beside the running executable, which for
+        // this test binary holds neither of our two names — so it refuses
+        // before touching anything, and the foreign copy is untouched either
+        // way. What matters is that no path here reaches `foreign`.
+        let err = reinstall(None).unwrap_err();
+        assert!(err.contains("is not there to install"), "{err}");
+        for name in Binaries::NAMES {
+            assert_eq!(std::fs::read(foreign.join(name)).unwrap(), b"scoop", "{name} was written");
+        }
     }
 
     #[test]
-    fn without_a_registration_the_binaries_stay_where_they_are() {
-        let from = Path::new(r"C:\somewhere\else");
-        assert_eq!(destination(None, from), from);
-    }
-
-    /// An install that has since been deleted must not be recreated.
-    #[test]
-    fn a_registration_pointing_nowhere_is_ignored() {
-        let from = Path::new(r"C:\somewhere\else");
-        let gone = PathBuf::from(r"C:\no\such\directory\ro_shellext.dll");
-        assert_eq!(destination(Some(gone), from), from);
-    }
-
-    #[test]
-    fn a_directory_is_the_same_as_itself_however_it_is_spelled() {
+    fn the_destination_is_not_made_until_the_source_is_whole() {
         let dir = tempfile::tempdir().unwrap();
-        let plain = dir.path().to_path_buf();
-        let roundabout = plain.join("sub").join("..");
-        std::fs::create_dir(plain.join("sub")).unwrap();
-        assert!(same_directory(&plain, &roundabout));
-        assert!(!same_directory(&plain, &plain.join("sub")));
+        let to = dir.path().join("not").join("there").join("yet");
+        // The source pair is checked first, so this fails before anything is
+        // created anywhere.
+        assert!(reinstall(Some(&to)).is_err());
+        assert!(!to.exists(), "the destination is made only once the source is whole");
     }
 }
