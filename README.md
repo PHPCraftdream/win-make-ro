@@ -1,12 +1,36 @@
+<img src="assets/main_icon.png" alt="" width="96" align="right">
+
 # win-make-ro
 
 [![CI](https://github.com/PHPCraftdream/win-make-ro/actions/workflows/ci.yml/badge.svg)](https://github.com/PHPCraftdream/win-make-ro/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 2024](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![MSRV 1.85](https://img.shields.io/badge/rustc-1.85%2B-orange.svg)](#tests)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d4.svg)](#build-install-remove)
 
 Explorer context-menu items **Make read only** / **Remove read only** for files and
 folders on NTFS.
+
+Windows already has a read-only checkbox, but it sets a file *attribute*:
+advisory, cleared by anyone who can reach the file, and ignored outright by
+most programs that overwrite in place. This sets a deny ACE instead, which the
+kernel enforces against every account — administrators included — and which
+Windows propagates down a folder tree on its own. The second menu item appears
+only where the lock is recognisably this tool's own, so nothing else in your
+ACLs is disturbed.
+
+## Status
+
+Version 0.1.0, and no release has been published yet: the `scoop` and `npm`
+instructions below describe how the packages are built and what they do, not
+something you can install today. Everything is covered by tests that run on
+every push (95 in each profile, plus the packaging and release scripts), on
+Windows 10. Windows 11 has not been tried, and neither has the UAC prompt
+end to end.
+
+The binaries are not code-signed, so SmartScreen will warn the first time one
+runs. Building from source is three commands and is described under
+[Build, install, remove](#build-install-remove).
 
 ## How the lock works
 
@@ -58,7 +82,7 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 |----------------|-------------------------------------------------------------------|
 | `ro-core`      | ACL logic: `lock_state`, `lock`, `unlock`, `lock_tree`, `unlock_tree` |
 | `ro-register`  | per-user registry (`HKCU\Software\Classes`) install / uninstall  |
-| `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `uninstall`    |
+| `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `reinstall`, `uninstall` |
 | `ro-shellext`  | COM DLL: `IShellExtInit` + `IContextMenu`, launches the helper    |
 
 Packaging lives in `bucket/` (the Scoop manifest, where `scoop bucket add`
@@ -191,20 +215,39 @@ Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with
 ```
 cargo test --workspace
 cargo test --workspace --release   # the COM tests load a built DLL
+cargo clippy --workspace --all-targets -- -D warnings
 cargo +1.85 check --workspace --all-targets
+node npm/test/lifecycle.test.js    # the npm packaging contract
+pwsh -File .github/scripts/plan-release-assets.tests.ps1
+pwsh -File .github/scripts/update-scoop-manifest.tests.ps1
 ```
+
+Nothing is mocked where a real one would do: the ACL tests write real DACLs,
+the COM tests load the real DLL, the CLI tests drive the real executable.
 
 - `ro-core/tests`: real ACLs in a temp directory (files, folders, inheritance,
   nested locks, blocked inheritance, junctions, foreign deny ACEs).
-- `win-make-ro/tests/cli.rs`: the built helper end-to-end.
+- `ro-core/tests/regressions.rs`: the review findings, each pinned to the
+  behaviour that used to be wrong.
+- `win-make-ro/tests/cli.rs`: the built helper end-to-end, down to a DACL
+  filled to the 64 KB limit and names holding unpaired surrogates.
 - `ro-shellext/tests/com_e2e.rs`: loads the DLL, builds a shell data object,
   checks the menu items and invokes them; the DLL waits for the helper when
   `WIN_MAKE_RO_SYNC=1` is set.
+- `ro-shellext/tests/runtime_deps.rs`: reads the import table of the built exe
+  and dll and refuses any C runtime import, so the artifacts stay loadable on a
+  Windows with no redistributable.
 - `ro-register/tests`: registry writes against a scratch key under HKCU.
-- `ro-core/tests/regressions.rs`: the review findings, each pinned to the
-  behaviour that used to be wrong.
+- `npm/test/lifecycle.test.js`: runs the real install scripts with spawning,
+  the file system and the platform substituted, so the packaging behaviour is
+  checked without touching Explorer.
+
+Two things the suite cannot reach, and does not pretend to: the UAC prompt, and
+`reinstall` actually closing and reopening Explorer.
 
 ## License
+
+Copyright © 2026 Marat K ([@PHPCraftdream](https://github.com/PHPCraftdream)).
 
 Licensed under either of
 
