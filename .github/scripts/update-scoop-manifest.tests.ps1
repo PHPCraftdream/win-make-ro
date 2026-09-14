@@ -97,6 +97,27 @@ Test-Case 'double digits compare numerically, not as text' {
     Assert-Equal $false (Invoke-Update -From '0.10.0' -To '0.9.0').Changed '0.10.0 -> 0.9.0'
 }
 
+# SemVer puts no ceiling on a numeric field, so Int32 is the wrong type for
+# one: both of these are legal versions and npm's own semver orders them.
+Test-Case 'numeric identifiers beyond Int32 still compare' {
+    Assert-Equal $true (Invoke-Update -From '1.0.0-rc.2147483647' -To '1.0.0-rc.2147483648').Changed 'rc.2147483647 -> rc.2147483648'
+    Assert-Equal $false (Invoke-Update -From '1.0.0-rc.2147483648' -To '1.0.0-rc.2147483647').Changed 'rc.2147483648 -> rc.2147483647'
+}
+
+Test-Case 'major, minor and patch beyond Int32 still compare' {
+    Assert-Equal $true (Invoke-Update -From '2147483647.0.0' -To '2147483648.0.0').Changed 'major forward'
+    Assert-Equal $false (Invoke-Update -From '2147483648.0.0' -To '2147483647.0.0').Changed 'major backward'
+    Assert-Equal $true (Invoke-Update -From '1.2147483647.0' -To '1.2147483648.0').Changed 'minor forward'
+    Assert-Equal $true (Invoke-Update -From '1.0.2147483647' -To '1.0.2147483648').Changed 'patch forward'
+}
+
+# Past Int64 as well, since nothing in the format stops at 64 bits either.
+Test-Case 'numeric identifiers beyond Int64 still compare' {
+    Assert-Equal $true (Invoke-Update -From '1.0.0-rc.18446744073709551615' -To '1.0.0-rc.18446744073709551616').Changed 'forward'
+    Assert-Equal $false (Invoke-Update -From '1.0.0-rc.18446744073709551616' -To '1.0.0-rc.18446744073709551615').Changed 'backward'
+    Assert-Equal $true (Invoke-Update -From '18446744073709551615.0.0' -To '18446744073709551616.0.0').Changed 'major forward'
+}
+
 Test-Case 'an unparsable version stops the update' {
     foreach ($pair in @(@('latest', '1.0.0'), @('1.0.0', 'v1.0.0'))) {
         $threw = $false

@@ -37,12 +37,21 @@ function ConvertTo-SemVer {
     if ($m.Groups[4].Success) {
         $pre = @($m.Groups[4].Value.Split('.'))
     }
+    # BigInteger, not Int32: SemVer sets no ceiling on a numeric field, and
+    # a version is not this script's to reject for being large.
     [pscustomobject]@{
-        Major      = [int]$m.Groups[1].Value
-        Minor      = [int]$m.Groups[2].Value
-        Patch      = [int]$m.Groups[3].Value
+        Major      = [bigint]$m.Groups[1].Value
+        Minor      = [bigint]$m.Groups[2].Value
+        Patch      = [bigint]$m.Groups[3].Value
         PreRelease = $pre
     }
+}
+
+function Get-Sign {
+    param($Value)
+    if ($Value -gt 0) { return 1 }
+    if ($Value -lt 0) { return -1 }
+    return 0
 }
 
 function Compare-PreReleaseId {
@@ -50,18 +59,18 @@ function Compare-PreReleaseId {
     $leftNumeric = $Left -match '^\d+$'
     $rightNumeric = $Right -match '^\d+$'
     if ($leftNumeric -and $rightNumeric) {
-        return [int]$Left - [int]$Right
+        return [bigint]::Compare([bigint]$Left, [bigint]$Right)
     }
     # Numeric identifiers always rank lower than alphanumeric ones.
     if ($leftNumeric) { return -1 }
     if ($rightNumeric) { return 1 }
-    return [string]::CompareOrdinal($Left, $Right)
+    return Get-Sign ([string]::CompareOrdinal($Left, $Right))
 }
 
 function Compare-SemVer {
     param($Left, $Right)
     foreach ($part in 'Major', 'Minor', 'Patch') {
-        $diff = $Left.$part - $Right.$part
+        $diff = [bigint]::Compare($Left.$part, $Right.$part)
         if ($diff -ne 0) { return $diff }
     }
     # A pre-release ranks below the release it leads up to.
@@ -73,7 +82,7 @@ function Compare-SemVer {
         if ($diff -ne 0) { return $diff }
     }
     # All shared identifiers equal: the longer set wins.
-    return $Left.PreRelease.Count - $Right.PreRelease.Count
+    return Get-Sign ($Left.PreRelease.Count - $Right.PreRelease.Count)
 }
 
 $manifest = Get-Content $Path -Raw | ConvertFrom-Json
