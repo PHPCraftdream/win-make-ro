@@ -1,2 +1,4 @@
 target/
 dist/
+npm/vendor/win-make-ro.exe
+npm/vendor/ro_shellext.dll

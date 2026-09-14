@@ -55,32 +55,6 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 | `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `uninstall`    |
 | `ro-shellext`  | COM DLL: `IShellExtInit` + `IContextMenu`, launches the helper    |
 
-Packaging lives in `bucket/` (the Scoop manifest, where `scoop bucket add`
-expects it) and `npm/` (the published package; `npm/vendor/` is filled by the
-release workflow).
-
-## Install
-
-Either package registers the Explorer context menu for the current user, with
-no admin rights.
-
-```
-scoop bucket add win-make-ro https://github.com/PHPCraftdream/win-make-ro
-scoop install win-make-ro
-```
-
-```
-npm install -g win-make-ro
-```
-
-The npm package ships the binaries and is marked `win32`/`x64`; a project-local
-install deliberately skips registration, so run `npx win-make-ro install` for
-that case. Set `WIN_MAKE_RO_SKIP_REGISTER=1` to suppress it entirely.
-Uninstalling either package removes the registry entries first.
-
-A release also carries a zip with both binaries and a `.sha256` beside it, if
-you would rather unpack it yourself and run `win-make-ro.exe install`.
-
 ## Build, install, remove
 
 ```

@@ -136,29 +136,28 @@ impl IContextMenu_Impl for MenuExt_Impl {
         let info = unsafe { &*pici };
         let items = self.lock_items();
         // With CMIC_MASK_UNICODE (spelled SEE_MASK_UNICODE here) the caller
-        // passes the larger CMINVOKECOMMANDINFOEX and the verb lives in
-        // lpVerbW; reading lpVerb then picks up an unrelated value.
-        let unicode = info.fMask & SEE_MASK_UNICODE != 0
-            && info.cbSize as usize >= std::mem::size_of::<CMINVOKECOMMANDINFOEX>();
-        let verb = if unicode {
+        // passes the larger CMINVOKECOMMANDINFOEX, which carries a second,
+        // wide verb field. A *string* verb may then arrive in lpVerbW, but the
+        // numeric id always stays in lpVerb: lpVerbW is NULL for it, so
+        // reading the id from there would run the first item instead.
+        let wide_verb = (info.fMask & SEE_MASK_UNICODE != 0
+            && info.cbSize as usize >= std::mem::size_of::<CMINVOKECOMMANDINFOEX>())
+        .then(|| {
             // SAFETY: the mask and cbSize together promise the Ex layout.
-            let ex = unsafe { &*(pici as *const CMINVOKECOMMANDINFOEX) };
-            ex.lpVerbW.0 as usize
-        } else {
-            info.lpVerb.0 as usize
-        };
-        // HIWORD == 0 means an item offset; otherwise a verb string.
-        let item = if verb >> 16 == 0 {
-            items.get(verb & 0xFFFF).copied()
-        } else if unicode {
+            unsafe { &*(pici as *const CMINVOKECOMMANDINFOEX) }
+        })
+        .filter(|ex| ex.lpVerbW.0 as usize >> 16 != 0);
+        let ansi_verb = info.lpVerb.0 as usize;
+        let item = if let Some(ex) = wide_verb {
             // SAFETY: lpVerbW is a NUL-terminated wide string in that case.
-            let ex = unsafe { &*(pici as *const CMINVOKECOMMANDINFOEX) };
             let s = unsafe { ex.lpVerbW.to_string() }.unwrap_or_default();
             items.iter().copied().find(|i| i.verb() == s)
-        } else {
+        } else if ansi_verb >> 16 != 0 {
             // SAFETY: lpVerb is a NUL-terminated ANSI string in that case.
             let s = unsafe { info.lpVerb.to_string() }.unwrap_or_default();
             items.iter().copied().find(|i| i.verb() == s)
+        } else {
+            items.get(ansi_verb & 0xFFFF).copied()
         };
         let item = item.filter(|i| i.enabled()).ok_or(E_INVALIDARG)?;
         let helper = Module::helper_path().ok_or(E_FAIL)?;

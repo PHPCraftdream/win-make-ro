@@ -1,6 +1,8 @@
 //! Writes to a scratch key under HKCU so the real registration is untouched.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 
 use ro_register::{CLSID, HANDLER_NAME, install_under, is_installed_under, uninstall_under};
 use windows_registry::{CURRENT_USER, Key};
@@ -11,8 +13,10 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn new() -> Self {
-        let path = format!(r"Software\WinMakeRO-test\{}", std::process::id());
+    /// One key per test: the suite runs them in parallel in a single process,
+    /// so a key keyed only by process id would be shared.
+    fn new(label: &str) -> Self {
+        let path = format!(r"Software\WinMakeRO-test\{}-{label}", std::process::id());
         let key = CURRENT_USER.create(&path).unwrap();
         Self { path, key }
     }
@@ -26,7 +30,7 @@ impl Drop for Scratch {
 
 #[test]
 fn install_writes_all_keys_and_uninstall_removes_them() {
-    let s = Scratch::new();
+    let s = Scratch::new("install");
     let dll = Path::new(r"C:\some where\ro_shellext.dll");
     assert!(is_installed_under(&s.key).is_none());
 
@@ -48,5 +52,24 @@ fn install_writes_all_keys_and_uninstall_removes_them() {
     assert!(is_installed_under(&s.key).is_none());
     assert!(s.key.open(format!(r"*\shellex\ContextMenuHandlers\{HANDLER_NAME}")).is_err());
     // Second uninstall is a no-op, not an error.
+    uninstall_under(&s.key).unwrap();
+}
+
+/// A Windows path may hold an unpaired surrogate. Writing it through
+/// `to_string_lossy` stores U+FFFD instead and registers a file that does not
+/// exist, while reporting success.
+#[test]
+fn a_lone_surrogate_in_the_dll_path_is_stored_verbatim() {
+    let s = Scratch::new("surrogate");
+    let mut name: Vec<u16> = r"C:\dir".encode_utf16().collect();
+    name.push(0xD800);
+    name.extend(r"\a.dll".encode_utf16());
+    let odd = PathBuf::from(OsString::from_wide(&name));
+
+    install_under(&s.key, &odd).unwrap();
+    let stored = is_installed_under(&s.key).expect("registered");
+    assert_eq!(stored, odd, "the stored path differs from the one installed");
+    assert_eq!(stored.as_os_str().len(), odd.as_os_str().len());
+
     uninstall_under(&s.key).unwrap();
 }

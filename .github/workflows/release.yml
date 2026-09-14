@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Stage the package
+        shell: pwsh
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          $version = $tag.TrimStart('v')
+          $manifest = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq 'win-make-ro' }
+          if ($manifest.version -ne $version) {
+            throw "tag $tag does not match Cargo.toml version $($manifest.version)"
+          }
+          $name = "win-make-ro-$version-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item target/release/win-make-ro.exe "dist/$name/"
+          Copy-Item target/release/ro_shellext.dll "dist/$name/"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          "VERSION=$version" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          "ARCHIVE=dist/$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          "SHA256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+
+      - name: Stage the npm package
+        shell: pwsh
+        run: |
+          Copy-Item target/release/win-make-ro.exe npm/vendor/
+          Copy-Item target/release/ro_shellext.dll npm/vendor/
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE npm/
+          $pkg = Get-Content npm/package.json -Raw | ConvertFrom-Json
+          if ($pkg.version -ne $env:VERSION) {
+            throw "npm/package.json is at $($pkg.version), the tag says $env:VERSION"
+          }
+
+      - name: Publish the release
+        shell: pwsh
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
+          $notes = @"
+          SHA-256 of the archive: $env:SHA256
+
+          Install with Scoop:
+
+              scoop bucket add win-make-ro https://github.com/$env:GITHUB_REPOSITORY
+              scoop install win-make-ro
+
+          Install with npm:
+
+              npm install -g win-make-ro
+
+          Either one registers the Explorer context menu for the current user.
+          "@
+          gh release create $tag $env:ARCHIVE "$env:ARCHIVE.sha256" `
+            --title $tag --notes $notes
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Point the Scoop manifest at the new release
+        shell: pwsh
+        run: |
+          $path = "bucket/win-make-ro.json"
+          $m = Get-Content $path -Raw | ConvertFrom-Json
+          $name = "win-make-ro-$env:VERSION-x86_64-pc-windows-msvc.zip"
+          $m.version = $env:VERSION
+          $m.architecture."64bit".url =
+            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
+          $m.architecture."64bit".hash = $env:SHA256
+          $m | ConvertTo-Json -Depth 10 | Set-Content $path -Encoding utf8
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add $path
+          if (git diff --cached --quiet) { exit 0 }
+          git commit -m "scoop: point the manifest at v$env:VERSION"
+          git push origin HEAD:${{ github.event.repository.default_branch }}
+
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        shell: pwsh
+        working-directory: npm
+        run: |
+          "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Out-File -Encoding ascii .npmrc
+          npm publish --access public
+          Remove-Item .npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

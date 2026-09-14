@@ -1,0 +1,46 @@
+{
+  "name": "win-make-ro",
+  "version": "0.1.0",
+  "description": "Explorer context menu: Make / Remove read only for files and folders via an NTFS deny ACE",
+  "keywords": [
+    "windows",
+    "explorer",
+    "context-menu",
+    "shell-extension",
+    "ntfs",
+    "acl",
+    "read-only"
+  ],
+  "homepage": "https://github.com/PHPCraftdream/win-make-ro#readme",
+  "bugs": "https://github.com/PHPCraftdream/win-make-ro/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PHPCraftdream/win-make-ro.git",
+    "directory": "npm"
+  },
+  "license": "(MIT OR Apache-2.0)",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "bin": {
+    "win-make-ro": "bin/win-make-ro.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "vendor/",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "preuninstall": "node scripts/preuninstall.js"
+  }
+}

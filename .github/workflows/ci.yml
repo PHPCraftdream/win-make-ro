@@ -20,6 +20,23 @@ jobs:
       # The COM tests load a built DLL, so the release profile needs its own run.
       - run: cargo test --workspace --release --locked
 
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The three published versions must agree
+        shell: bash
+        run: |
+          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          npm_version=$(node -p "require('./npm/package.json').version")
+          scoop_version=$(node -p "require('./bucket/win-make-ro.json').version")
+          echo "cargo=$cargo_version npm=$npm_version scoop=$scoop_version"
+          test "$cargo_version" = "$npm_version"
+          test "$cargo_version" = "$scoop_version"
+      - name: The npm scripts must parse
+        run: |
+          for f in npm/bin/*.js npm/scripts/*.js; do node --check "$f"; done
+
   msrv:
     runs-on: windows-latest
     steps:

@@ -7,6 +7,7 @@ mod clsid;
 mod install;
 mod is_installed;
 mod notify;
+mod set_path;
 mod uninstall;
 
 pub use clsid::{CLSID, HANDLER_NAME};

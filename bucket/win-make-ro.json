@@ -1,0 +1,37 @@
+{
+    "version": "0.1.0",
+    "description": "Explorer context menu: Make / Remove read only for files and folders via an NTFS deny ACE",
+    "homepage": "https://github.com/PHPCraftdream/win-make-ro",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/PHPCraftdream/win-make-ro/releases/download/v0.1.0/win-make-ro-0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "win-make-ro.exe",
+    "post_install": [
+        "& \"$dir\\win-make-ro.exe\" install",
+        "Write-Host 'Context menu registered for the current user.'"
+    ],
+    "pre_uninstall": [
+        "& \"$dir\\win-make-ro.exe\" uninstall"
+    ],
+    "notes": [
+        "The context menu is registered for the current user; no admin rights are needed.",
+        "Explorer keeps the DLL loaded, so an update may need explorer.exe restarted."
+    ],
+    "checkver": {
+        "github": "https://github.com/PHPCraftdream/win-make-ro"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/PHPCraftdream/win-make-ro/releases/download/v$version/win-make-ro-$version-x86_64-pc-windows-msvc.zip"
+            }
+        },
+        "hash": {
+            "url": "$url.sha256"
+        }
+    }
+}
