@@ -5,6 +5,7 @@ pub enum Command {
     Status,
     Install,
     Reinstall,
+    RestartExplorer,
     Uninstall,
 }
 
@@ -16,6 +17,7 @@ impl Command {
             "status" => Self::Status,
             "install" => Self::Install,
             "reinstall" => Self::Reinstall,
+            "restart-explorer" => Self::RestartExplorer,
             "uninstall" => Self::Uninstall,
             _ => return None,
         })
@@ -32,6 +34,7 @@ impl Command {
             Self::Status => "status",
             Self::Install => "install",
             Self::Reinstall => "reinstall",
+            Self::RestartExplorer => "restart-explorer",
             Self::Uninstall => "uninstall",
         }
     }

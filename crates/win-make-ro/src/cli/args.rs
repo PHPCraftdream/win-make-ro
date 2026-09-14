@@ -192,6 +192,10 @@ mod tests {
         assert!(parse(&["install"]).is_ok());
         assert!(parse(&["reinstall", "x"]).is_err());
         assert!(parse(&["reinstall"]).is_ok());
+        // `reinstall` runs this as a child; naming it makes that visible
+        // rather than a hidden verb nobody can look up.
+        assert_eq!(parse(&["restart-explorer"]).unwrap().command, Command::RestartExplorer);
+        assert!(parse(&["restart-explorer", "x"]).is_err());
     }
 
     #[test]

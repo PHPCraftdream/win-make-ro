@@ -6,6 +6,7 @@ usage:
   win-make-ro install                                   register the context menu (current user)
   win-make-ro reinstall [--here | --to <dir>]           register this copy, restart Explorer
   win-make-ro uninstall                                 remove the context menu
+  win-make-ro restart-explorer                          close Explorer and start it again
 
   --gui                report errors in a message box instead of stderr
   --no-elevate         never re-launch elevated on access denied

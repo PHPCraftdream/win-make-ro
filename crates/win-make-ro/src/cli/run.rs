@@ -19,6 +19,7 @@ fn dispatch(args: &Args) -> i32 {
         Command::Status => status(&args.paths),
         Command::Install => registry(args.gui, install_here()),
         Command::Reinstall => reinstall(args),
+        Command::RestartExplorer => registry(args.gui, crate::reinstall::close_and_start()),
         Command::Uninstall => {
             registry(args.gui, ro_register::uninstall().map_err(|e| e.to_string()))
         }
@@ -56,9 +57,11 @@ fn reinstall(args: &Args) -> i32 {
         Restart::Failed(why) => {
             crate::ops::show_error(
                 args.gui,
+                // What state Explorer is in depends on where it went wrong,
+                // and `why` is the only part that knows: the old shell may be
+                // running, or already closed with nothing started in its place.
                 &format!(
-                    "the installation in {} is registered, but Explorer still runs the old \
-                     copy: {why}",
+                    "the installation in {} is registered, but Explorer was not restarted: {why}",
                     summary.to.display()
                 ),
             );

@@ -43,29 +43,36 @@ pub fn swap(from: &Path, to: &Path) -> io::Result<Vec<PathBuf>> {
     }
 
     // Nothing below copies content; these are directory-entry moves.
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new(); // (final name, what it displaced)
+    // Every name that ends up holding a new file is recorded, whether or not
+    // it displaced anything: a name that was free before still has to be freed
+    // again if a later one fails, or the rollback leaves half a pair behind.
+    let mut placed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
     for (index, (new, final_name)) in staged.iter().enumerate() {
-        let left = || staged.iter().skip(index).map(|(new, _)| new);
+        let rest = || staged.iter().skip(index).map(|(new, _)| new);
         let aside = if final_name.exists() {
             let a = to.join(Binaries::superseded(Binaries::NAMES[index], &stamp));
             if let Err(e) = fs::rename(final_name, &a) {
-                return Err(undo(done, left(), e));
+                return Err(undo(placed, rest(), e, Vec::new()));
             }
             Some(a)
         } else {
             None
         };
         if let Err(e) = fs::rename(new, final_name) {
+            // Nothing was put under this name, so only its predecessor — if
+            // there was one — has to come home. That move can fail too, and
+            // then it is part of what the caller is told.
+            let mut stuck = Vec::new();
             if let Some(a) = &aside {
-                let _ = fs::rename(a, final_name);
+                if fs::rename(a, final_name).is_err() {
+                    stuck.push(a.display().to_string());
+                }
             }
-            return Err(undo(done, left(), e));
+            return Err(undo(placed, rest(), e, stuck));
         }
-        if let Some(a) = aside {
-            done.push((final_name.clone(), a));
-        }
+        placed.push((final_name.clone(), aside));
     }
-    Ok(done.into_iter().map(|(_, aside)| aside).collect())
+    Ok(placed.into_iter().filter_map(|(_, aside)| aside).collect())
 }
 
 fn stamp() -> String {
@@ -82,22 +89,32 @@ fn remove_all<'a>(paths: impl Iterator<Item = &'a PathBuf>) {
 
 /// Puts back what was already exchanged and clears away what was staged,
 /// folding anything that resisted into the error the caller sees.
+///
+/// Reverse order, so the directory passes back through the states it came
+/// through. `stuck` carries what the caller already failed to put back.
 fn undo<'a>(
-    done: Vec<(PathBuf, PathBuf)>,
+    placed: Vec<(PathBuf, Option<PathBuf>)>,
     staged: impl Iterator<Item = &'a PathBuf>,
     cause: io::Error,
+    mut stuck: Vec<String>,
 ) -> io::Error {
     remove_all(staged);
-    let mut stuck = Vec::new();
-    for (final_name, aside) in done {
-        if fs::remove_file(&final_name).is_err() || fs::rename(&aside, &final_name).is_err() {
+    for (final_name, aside) in placed.into_iter().rev() {
+        // A name that held nothing before is put back to holding nothing.
+        if fs::remove_file(&final_name).is_err() {
             stuck.push(final_name.display().to_string());
+            continue;
+        }
+        if let Some(aside) = aside {
+            if fs::rename(&aside, &final_name).is_err() {
+                stuck.push(final_name.display().to_string());
+            }
         }
     }
     if stuck.is_empty() {
         return cause;
     }
-    io::Error::other(format!("{cause}; and these were left replaced: {}", stuck.join(", ")))
+    io::Error::other(format!("{cause}; and this was left behind: {}", stuck.join(", ")))
 }
 
 #[cfg(test)]
@@ -196,5 +213,31 @@ mod tests {
             assert_eq!(fs::read(to.join(name)).unwrap(), b"old", "{name} was left replaced");
         }
         assert_eq!(listing(&to), untouched(), "staged or superseded copies were left behind");
+    }
+
+    /// A destination is not always a complete pair — an earlier failure can
+    /// leave one of the two missing. The binary that displaced nothing used to
+    /// go unrecorded, so a failure on the other one left it in place: a new
+    /// helper beside an old DLL, which is the one combination never tested
+    /// together.
+    #[test]
+    fn a_binary_that_displaced_nothing_is_removed_by_the_rollback() {
+        let (_d, from, to) = dirs(Some("old"));
+        fs::remove_file(to.join(Binaries::NAMES[0])).expect("leave only the DLL behind");
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(to.join(Binaries::NAMES[1]))
+            .expect("lock the destination");
+        let outcome = swap(&from, &to);
+        drop(locked);
+
+        assert!(outcome.is_err(), "the locked file was replaced anyway");
+        assert_eq!(
+            listing(&to),
+            vec![Binaries::NAMES[1].to_string()],
+            "the destination did not come back as it was"
+        );
+        assert_eq!(fs::read(to.join(Binaries::NAMES[1])).unwrap(), b"old");
     }
 }

@@ -23,10 +23,10 @@ ACLs is disturbed.
 
 Version 0.1.0, and no release has been published yet: the `scoop` and `npm`
 instructions below describe how the packages are built and what they do, not
-something you can install today. Everything is covered by tests that run on
-every push (95 in each profile, plus the packaging and release scripts), on
-Windows 10. Windows 11 has not been tried, and neither has the UAC prompt
-end to end.
+something you can install today. 99 tests run on every push in each profile,
+alongside the packaging and release scripts, on Windows 10 — see
+[Tests](#tests) for what they reach and what they do not. Windows 11 has not
+been tried, and neither has the UAC prompt end to end.
 
 The binaries are not code-signed, so SmartScreen will warn the first time one
 runs. Building from source is three commands and is described under
@@ -82,7 +82,7 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 |----------------|-------------------------------------------------------------------|
 | `ro-core`      | ACL logic: `lock_state`, `lock`, `unlock`, `lock_tree`, `unlock_tree` |
 | `ro-register`  | per-user registry (`HKCU\Software\Classes`) install / uninstall  |
-| `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `reinstall`, `uninstall` |
+| `win-make-ro`  | helper exe: `lock`, `unlock`, `status`, `install`, `reinstall`, `uninstall`, `restart-explorer` |
 | `ro-shellext`  | COM DLL: `IShellExtInit` + `IContextMenu`, launches the helper    |
 
 Packaging lives in `bucket/` (the Scoop manifest, where `scoop bucket add`
@@ -112,14 +112,18 @@ A global install runs `reinstall --here` (see below), so **upgrading restarts
 Explorer**: npm has just rewritten the DLL the running one still has mapped,
 and only a restart makes the new code the one in use. `--here` registers the
 copy npm unpacked and touches no other directory. Nothing was registered
-before? Then nothing is loaded to replace, and the desktop is left alone. From
+before? Then nothing asked Explorer to load anything, and the desktop is left
+alone — that is a rule about the registry, not a look at what Explorer has
+mapped. From
 an elevated shell the restart is skipped — Explorer would keep the elevated
 token — and the install says so; run `win-make-ro reinstall --here` yourself
 from an ordinary window.
 
-Upgrading while Explorer holds the DLL can also fail inside npm itself, before
-any script of ours runs, because npm overwrites the file rather than renaming
-it. Restart Explorer and repeat the upgrade if that happens.
+npm 11 upgrades by renaming the old package directory aside, much as
+`reinstall` does, so a mapped DLL does not stop the new version from being
+installed — it surfaces as a cleanup warning about the directory npm could not
+delete afterwards. Older npm, or a different lock, may still refuse: restart
+Explorer and repeat the upgrade if it does.
 
 A release also carries a zip with both binaries and a `.sha256` beside it, if
 you would rather unpack it yourself and run `win-make-ro.exe install`.
@@ -149,6 +153,11 @@ reg delete "HKCU\Software\Classes\Directory\shellex\ContextMenuHandlers\WinMakeR
 
 Until they are removed Explorer keeps trying to load a DLL that is no longer
 there, which costs nothing but shows no menu items either.
+
+`uninstall` removes the registration whichever installation wrote it — there is
+only one set of keys, and they are not stamped with who put them there. If you
+have the menu from two sources at once, removing either takes the menu away;
+re-register the one you are keeping with `win-make-ro reinstall --here`.
 
 ## Build, install, remove
 
@@ -187,11 +196,29 @@ took it from whatever was registered, so an `npm install -g` on a machine
 carrying a Scoop or hand-made installation wrote its binaries into that other
 directory. Name the directory or get your own.
 
-Explorer is restarted only when something was registered before, since a first
-install has nothing loaded to replace, and never from an elevated process,
-which would hand the new shell its token for the rest of the session — there it
-registers and says the restart was skipped. A restart that was asked for and
-failed is reported as itself; the installation is registered either way.
+Explorer is restarted only when something was registered before — a rule about
+the registry rather than a measurement, since an earlier `uninstall` leaves the
+DLL mapped and the keys gone — and never from an elevated process, which would
+hand the new shell its token for the rest of the session; there it registers
+and says the restart was skipped. A restart that was asked for and failed is
+reported as itself; the installation is registered either way.
+
+The exchange itself runs in a child process:
+
+```
+win-make-ro restart-explorer
+```
+
+Asking Explorer to close queues a request that cannot be withdrawn, so from
+that moment somebody owes the machine a shell. That child has no deadline and
+does not give the duty up. `reinstall` watches it for half a minute and then
+stops watching — and says so, because the work is still going, not finished
+and not failed. Run the command on its own whenever you want the shell
+recycled without reinstalling anything.
+
+Relative destinations are made absolute before anything uses them: the path
+goes into the registry as given, and Explorer does not inherit the working
+directory you typed the command in.
 
 Scoop gives each version a directory of its own, so there is nothing to rename
 there and its manifest uses `install`; restart Explorer afterwards to drop the
@@ -205,6 +232,7 @@ win-make-ro unlock [--gui] [--no-elevate] -- <path>...
 win-make-ro status -- <path>...          # prints "<unlocked|locked|inherited>\t<path>"
 win-make-ro install | uninstall
 win-make-ro reinstall [--here | --to <dir>]
+win-make-ro restart-explorer
 ```
 
 Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with
@@ -242,8 +270,11 @@ the COM tests load the real DLL, the CLI tests drive the real executable.
   the file system and the platform substituted, so the packaging behaviour is
   checked without touching Explorer.
 
-Two things the suite cannot reach, and does not pretend to: the UAC prompt, and
-`reinstall` actually closing and reopening Explorer.
+What the suite does not reach, and does not pretend to: the UAC prompt,
+`reinstall` actually closing and reopening Explorer, and the Win32 failures
+behind them — a token that will not read, an `OpenProcess` that is refused.
+Those paths are shaped so the mistake is not expressible rather than caught by
+a test.
 
 ## License
 

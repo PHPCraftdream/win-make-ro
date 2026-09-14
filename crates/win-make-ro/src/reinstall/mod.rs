@@ -12,5 +12,6 @@ mod run;
 mod swap;
 mod sweep;
 
+pub use explorer::close_and_start;
 pub use outcome::Restart;
 pub use run::reinstall;
