@@ -4,11 +4,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ro_core::{
-    ErrorKind as RoKind, LockState, lock, lock_state, lock_tree, unlock, unlock_tree, wide_path,
+    ErrorKind as RoKind, LOCK_MASK, LockState, lock, lock_state, lock_tree, unlock, unlock_tree,
+    wide_path,
 };
-use windows::Win32::Foundation::ERROR_SUCCESS;
-use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
-use windows::Win32::Security::DACL_SECURITY_INFORMATION;
+use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::{
+    ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+};
+use windows::Win32::Security::{
+    ACE_HEADER, ACL, ACL_REVISION, AddAce, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+    GetLengthSid, INHERIT_ONLY_ACE, InitializeAcl, OBJECT_INHERIT_ACE, PSID,
+};
 use windows::core::PCWSTR;
 
 struct Guard(PathBuf);
@@ -34,20 +40,54 @@ fn icacls(args: &[&std::ffi::OsStr]) {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
 }
 
-/// icacls expands its `(W)` shorthand to FILE_GENERIC_WRITE, so an ACE with
-/// exactly LOCK_MASK has to be built through the .NET ACL API instead.
+/// Builds a deny ACE carrying exactly LOCK_MASK plus INHERIT_ONLY.
+///
+/// icacls expands its `(W)` shorthand to FILE_GENERIC_WRITE, and the runner's
+/// PowerShell cannot autoload the module holding `Set-Acl`, so the ACE is
+/// assembled by hand. Inherited entries come back on their own because the
+/// DACL is written unprotected.
 fn deny_inherit_only_lock_mask(path: &Path) {
-    let script = format!(
-        "$p='{}'; $acl = Get-Acl $p;          $sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0');          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid,            [System.Security.AccessControl.FileSystemRights]{},            'ContainerInherit,ObjectInherit', 'InheritOnly', 'Deny');          $acl.AddAccessRule($rule); Set-Acl -Path $p -AclObject $acl",
-        path.display(),
-        ro_core::LOCK_MASK,
-    );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .expect("powershell");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    const DENY_TYPE: u8 = 1;
+    let sid_text: Vec<u16> = "S-1-1-0".encode_utf16().chain(Some(0)).collect();
+    let mut psid = PSID::default();
+    // SAFETY: sid_text is NUL-terminated; psid receives a LocalAlloc'd SID.
+    unsafe { ConvertStringSidToSidW(PCWSTR(sid_text.as_ptr()), &mut psid) }.expect("sid");
+    // SAFETY: psid is a valid SID until freed below.
+    let sid_len = unsafe { GetLengthSid(psid) } as usize;
+
+    let ace_len = std::mem::size_of::<ACE_HEADER>() + 4 + sid_len;
+    let words = (std::mem::size_of::<ACL>() + ace_len).div_ceil(4);
+    let mut acl_buf = vec![0u32; words];
+    let acl = acl_buf.as_mut_ptr() as *mut ACL;
+    let mut ace = vec![0u8; ace_len];
+    let flags = OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0 | INHERIT_ONLY_ACE.0;
+    let header = ACE_HEADER { AceType: DENY_TYPE, AceFlags: flags as u8, AceSize: ace_len as u16 };
+    // SAFETY: acl_buf is 4-byte aligned and words*4 long; ace is exactly ace_len.
+    unsafe {
+        InitializeAcl(acl, (words * 4) as u32, ACL_REVISION).expect("init acl");
+        std::ptr::write_unaligned(ace.as_mut_ptr() as *mut ACE_HEADER, header);
+        std::ptr::write_unaligned(ace.as_mut_ptr().add(4) as *mut u32, LOCK_MASK);
+        std::ptr::copy_nonoverlapping(psid.0 as *const u8, ace.as_mut_ptr().add(8), sid_len);
+        AddAce(acl, ACL_REVISION, u32::MAX, ace.as_ptr() as *const _, ace_len as u32)
+            .expect("add ace");
+    }
+
+    let wide = wide_path(path).unwrap();
+    // SAFETY: wide is NUL-terminated; acl is a valid, initialised ACL.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl),
+            None,
+        )
+    };
+    // SAFETY: psid came from ConvertStringSidToSidW.
+    unsafe { LocalFree(Some(HLOCAL(psid.0))) };
+    assert_eq!(rc, ERROR_SUCCESS, "write inherit-only ACE");
 }
 
 fn junction(link: &Path, target: &Path) {
