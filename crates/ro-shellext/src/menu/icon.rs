@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
@@ -16,13 +14,30 @@ use crate::com::Module;
 /// Resource id of the icon in `assets/app.rc`.
 const ICON_ID: u16 = 1;
 
-static BITMAP: OnceLock<isize> = OnceLock::new();
+/// Owns the bitmap shown next to the menu items.
+///
+/// The handle is kept as an `isize` so the owner stays `Send + Sync`; GDI
+/// objects are process-wide, so using one from another thread is fine. The
+/// bitmap is freed on drop — a process-wide cache would leak one GDI object
+/// per load of this DLL.
+pub struct MenuIcon(isize);
 
-/// 32-bit ARGB bitmap of the app icon at small-icon size, for `hbmpItem`.
-/// Created once per process and kept alive for the DLL's lifetime.
-pub fn menu_bitmap() -> Option<HBITMAP> {
-    let raw = *BITMAP.get_or_init(|| build().map_or(0, |b| b.0 as isize));
-    (raw != 0).then_some(HBITMAP(raw as *mut _))
+impl MenuIcon {
+    /// 32-bit ARGB bitmap of the app icon at small-icon size, for `hbmpItem`.
+    pub fn new() -> Option<Self> {
+        build().map(|b| Self(b.0 as isize))
+    }
+
+    pub fn bitmap(&self) -> HBITMAP {
+        HBITMAP(self.0 as *mut _)
+    }
+}
+
+impl Drop for MenuIcon {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from CreateDIBSection and is owned by us.
+        let _ = unsafe { DeleteObject(self.bitmap().into()) };
+    }
 }
 
 fn build() -> Option<HBITMAP> {

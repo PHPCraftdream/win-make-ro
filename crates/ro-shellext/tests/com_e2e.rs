@@ -1,21 +1,23 @@
 //! End-to-end through the real COM surface: loads the built DLL, feeds it a
 //! shell data object, inspects the menu it builds and invokes the commands.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ro_core::{LockState, lock_state, unlock_tree};
-use windows::Win32::Foundation::{HMODULE, S_FALSE, S_OK};
+use windows::Win32::Foundation::{FreeLibrary, HMODULE, S_FALSE, S_OK};
 use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, CoInitializeEx, IClassFactory, IDataObject,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, CMINVOKECOMMANDINFO, GCS_VERBW, IContextMenu, ILCreateFromPathW, ILFree,
-    IShellExtInit, SHCreateShellItemArrayFromIDLists,
+    BHID_DataObject, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu,
+    ILCreateFromPathW, ILFree, IShellExtInit, SEE_MASK_UNICODE, SHCreateShellItemArrayFromIDLists,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetMenuState,
@@ -37,20 +39,40 @@ fn wide(s: &OsStr) -> Vec<u16> {
     s.encode_wide().chain(Some(0)).collect()
 }
 
-/// target/debug from target/debug/deps/<test>.exe
+/// target/<profile> from target/<profile>/deps/<test>.exe
 fn target_dir() -> PathBuf {
     std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_path_buf()
 }
 
+/// The profile this test itself was built with, taken from the artifact
+/// directory rather than guessed, so a release run builds release artifacts.
+fn profile() -> String {
+    target_dir().file_name().unwrap().to_string_lossy().into_owned()
+}
+
 /// `cargo test` alone does not emit the cdylib or the helper into target/;
-/// build both so the DLL can be loaded and can find `win-make-ro.exe`.
+/// build both so the DLL can be loaded and can find `win-make-ro.exe`. The
+/// build must target the same profile as this test, or a release run would
+/// load whatever stale debug artifact happens to sit next to it.
 fn ensure_built() {
-    let st = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "win-make-ro", "-p", "ro-shellext"])
-        .status()
-        .expect("cargo build");
-    assert!(st.success());
-    assert!(target_dir().join("win-make-ro.exe").is_file());
+    let profile = profile();
+    let mut cmd = std::process::Command::new(env!("CARGO"));
+    cmd.args(["build", "-p", "win-make-ro", "-p", "ro-shellext"]);
+    match profile.as_str() {
+        "debug" => {}
+        "release" => {
+            cmd.arg("--release");
+        }
+        other => {
+            cmd.args(["--profile", other]);
+        }
+    }
+    let st = cmd.status().expect("cargo build");
+    assert!(st.success(), "building the {profile} artifacts failed");
+    assert!(
+        target_dir().join("win-make-ro.exe").is_file(),
+        "helper missing from the {profile} artifacts"
+    );
 }
 
 struct Dll {
@@ -356,4 +378,115 @@ fn initialize_without_selection_fails() {
     // SAFETY: null data object is the case under test.
     let r = unsafe { init.Initialize(None, None, None) };
     assert!(r.is_err());
+}
+
+/// A file name may hold an unpaired surrogate. Folding it into U+FFFD points
+/// the handler at a different path, so the menu described the wrong file.
+#[test]
+fn a_lone_surrogate_in_the_name_still_identifies_the_right_file() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+
+    let dir = tempfile::tempdir().unwrap();
+    let odd =
+        dir.path().join(OsString::from_wide(&[b'a' as u16, 0xD800, b'.' as u16, b't' as u16]));
+    fs::write(&odd, b"x").unwrap();
+    let _g = Guard(odd.clone());
+    ro_core::lock(&odd).unwrap();
+    assert_eq!(lock_state(&odd).unwrap(), LockState::Explicit);
+
+    let dll = Dll::load();
+    let ctx = context_menu(&dll, &[&odd]);
+    assert_eq!(
+        query(&ctx),
+        vec![("Remove read only".to_string(), true)],
+        "the handler read a different path"
+    );
+    drop(ctx);
+}
+
+/// With CMIC_MASK_UNICODE the verb lives in lpVerbW; reading lpVerb instead
+/// used to run the first menu item, turning an unlock into a lock.
+#[test]
+fn a_unicode_verb_selects_the_command_it_names() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // SAFETY: test-only switch read by the DLL; set before any COM object exists.
+    unsafe { std::env::set_var("WIN_MAKE_RO_SYNC", "1") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked.txt");
+    let free = dir.path().join("free.txt");
+    fs::write(&locked, b"l").unwrap();
+    fs::write(&free, b"f").unwrap();
+    let _gl = Guard(locked.clone());
+    let _gf = Guard(free.clone());
+    ro_core::lock(&locked).unwrap();
+
+    let dll = Dll::load();
+    let ctx = context_menu(&dll, &[&locked, &free]);
+    // Mixed selection: item 0 locks, item 1 unlocks.
+    assert_eq!(
+        query(&ctx),
+        vec![("Make read only".to_string(), true), ("Remove read only".to_string(), true)]
+    );
+
+    let verb: Vec<u16> = "removereadonly".encode_utf16().chain(Some(0)).collect();
+    let info = CMINVOKECOMMANDINFOEX {
+        cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+        fMask: SEE_MASK_UNICODE,
+        lpVerbW: PCWSTR(verb.as_ptr()),
+        ..Default::default()
+    };
+    // SAFETY: the struct is fully initialised and matches the advertised mask.
+    unsafe { ctx.InvokeCommand(std::ptr::from_ref(&info).cast::<CMINVOKECOMMANDINFO>()) }
+        .expect("InvokeCommand");
+
+    assert_eq!(lock_state(&locked).unwrap(), LockState::Unlocked, "unlock did not run");
+    assert_eq!(lock_state(&free).unwrap(), LockState::Unlocked, "the unlocked file got locked");
+    drop(ctx);
+}
+
+/// The menu bitmap belongs to the object that built the menu. A process-wide
+/// cache is never freed, so every load of the DLL left one more GDI object
+/// behind; this drives whole load/unload cycles to see that.
+#[test]
+fn the_menu_bitmap_is_released_with_the_object() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"x").unwrap();
+
+    let gdi = || {
+        // SAFETY: a pseudo-handle to our own process needs no release.
+        unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) }
+    };
+    let round = |paths: &[&Path]| {
+        let dll = Dll::load();
+        let ctx = context_menu(&dll, paths);
+        query(&ctx);
+        drop(ctx);
+        // SAFETY: every object handed out above has been released.
+        unsafe { FreeLibrary(dll.module) }.expect("FreeLibrary");
+    };
+
+    // Warm-up: the first menu also pulls in GDI state that is not ours.
+    round(&[&f]);
+    round(&[&f]);
+
+    let rounds = 8;
+    let before = gdi();
+    for _ in 0..rounds {
+        round(&[&f]);
+    }
+    let after = gdi();
+    assert!(
+        after < before + rounds,
+        "GDI objects grew from {before} to {after} over {rounds} load/unload cycles"
+    );
 }

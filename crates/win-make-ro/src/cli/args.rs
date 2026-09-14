@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::Command;
@@ -12,17 +13,24 @@ pub struct Args {
 }
 
 impl Args {
-    pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Self, String> {
+    /// Takes `OsString`s: a path that is not valid Unicode still has to survive
+    /// intact, so nothing here goes through `String`.
+    pub fn parse(mut it: impl Iterator<Item = OsString>) -> Result<Self, String> {
         let word = it.next().ok_or("missing command")?;
-        let command = Command::parse(&word).ok_or_else(|| format!("unknown command: {word}"))?;
+        let command = word
+            .to_str()
+            .and_then(Command::parse)
+            .ok_or_else(|| format!("unknown command: {}", word.to_string_lossy()))?;
         let mut args = Args { command, paths: Vec::new(), gui: false, no_elevate: false };
         let mut opts_done = false;
         for a in it {
-            match a.as_str() {
-                "--" if !opts_done => opts_done = true,
-                "--gui" if !opts_done => args.gui = true,
-                "--no-elevate" if !opts_done => args.no_elevate = true,
-                s if s.starts_with("--") && !opts_done => {
+            // Only a valid-Unicode argument can be an option; anything else is
+            // a path by definition.
+            match a.to_str() {
+                Some("--") if !opts_done => opts_done = true,
+                Some("--gui") if !opts_done => args.gui = true,
+                Some("--no-elevate") if !opts_done => args.no_elevate = true,
+                Some(s) if !opts_done && s.starts_with("--") => {
                     return Err(format!("unknown option: {s}"));
                 }
                 _ => args.paths.push(PathBuf::from(a)),
@@ -38,8 +46,8 @@ impl Args {
     }
 
     /// Re-encodes for a child process; options first, then `--`, then paths.
-    pub fn to_argv(&self) -> Vec<String> {
-        let mut v = vec![self.command.as_str().to_string()];
+    pub fn to_argv(&self) -> Vec<OsString> {
+        let mut v = vec![OsString::from(self.command.as_str())];
         if self.gui {
             v.push("--gui".into());
         }
@@ -47,17 +55,19 @@ impl Args {
             v.push("--no-elevate".into());
         }
         v.push("--".into());
-        v.extend(self.paths.iter().map(|p| p.to_string_lossy().into_owned()));
+        v.extend(self.paths.iter().map(|p| p.clone().into_os_string()));
         v
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::ffi::OsStringExt;
+
     use super::*;
 
     fn parse(s: &[&str]) -> Result<Args, String> {
-        Args::parse(s.iter().map(|s| s.to_string()))
+        Args::parse(s.iter().map(OsString::from))
     }
 
     #[test]
@@ -91,5 +101,16 @@ mod tests {
         let a = parse(&["unlock", "--gui", "--no-elevate", "--", "C:\\a b", "--x"]).unwrap();
         let b = Args::parse(a.to_argv().into_iter()).unwrap();
         assert_eq!(a, b);
+    }
+
+    /// A path that is not valid Unicode must survive parsing and re-encoding.
+    #[test]
+    fn lone_surrogate_path_survives() {
+        let odd = OsString::from_wide(&[b'x' as u16, 0xD800]);
+        let a =
+            Args::parse([OsString::from("lock"), OsString::from("--"), odd.clone()].into_iter())
+                .unwrap();
+        assert_eq!(a.paths, vec![PathBuf::from(&odd)]);
+        assert_eq!(Args::parse(a.to_argv().into_iter()).unwrap(), a);
     }
 }

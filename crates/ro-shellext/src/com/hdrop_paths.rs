@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use windows::Win32::System::Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL};
@@ -42,7 +44,9 @@ fn read_drop(hdrop: HDROP) -> Vec<PathBuf> {
                 }
                 let mut buf = vec![0u16; len + 1];
                 let n = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
-                Some(PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+                // from_utf16_lossy would fold an unpaired surrogate into
+                // U+FFFD and point the operation at a different file.
+                Some(PathBuf::from(OsString::from_wide(&buf[..n])))
             })
             .collect()
     }

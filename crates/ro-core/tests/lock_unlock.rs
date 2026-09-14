@@ -167,9 +167,11 @@ fn unlock_tree_removes_nested_explicit_locks() {
     let rep = lock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
     assert_eq!(rep.changed, 1, "only root needed a change");
-    assert_eq!(state(&f2), LockState::Explicit);
-    assert_eq!(state(&inner), LockState::Explicit);
-    assert_eq!(state(&f1), LockState::Inherited);
+    // The nested ACEs are still there, but the root's lock is what governs
+    // removal now, so every descendant reports as parent-locked.
+    for p in [&f1, &f2, &inner] {
+        assert_eq!(state(p), LockState::Inherited, "{}", p.display());
+    }
 
     let rep = unlock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);

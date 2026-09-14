@@ -18,7 +18,6 @@ use crate::cli::{Args, EXIT_ERRORS};
 pub fn elevate(args: &Args) -> i32 {
     let mut child = args.clone();
     child.no_elevate = true;
-    let params = child.to_argv().iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -29,7 +28,16 @@ pub fn elevate(args: &Args) -> i32 {
     let wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
     let verb = wide(OsStr::new("runas"));
     let file = wide(exe.as_os_str());
-    let params = wide(OsStr::new(&params));
+    // Built in UTF-16: a path that is not valid Unicode must reach the child
+    // unchanged, so the command line is never routed through a String.
+    let mut params: Vec<u16> = Vec::new();
+    for a in child.to_argv() {
+        if !params.is_empty() {
+            params.push(u16::from(b' '));
+        }
+        params.extend_from_slice(&quote(&a));
+    }
+    params.push(0);
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,

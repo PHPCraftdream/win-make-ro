@@ -133,15 +133,15 @@ fn child_with_explicit_allow_gets_its_own_lock() {
 
     let rep = lock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(lock_state(&shadowed).unwrap(), LockState::Explicit, "must not rely on inheritance");
     assert!(fs::write(&shadowed, b"y").is_err(), "shadowed child stayed writable");
-    // A child with nothing shadowing the lock still needs no ACE of its own.
-    assert_eq!(lock_state(&plain).unwrap(), LockState::Inherited);
     assert!(fs::write(&plain, b"y").is_err());
+    // Two changes: the root, and the shadowed child that needed an ACE of its
+    // own. A child with nothing shadowing the lock is left to inheritance.
     assert_eq!(rep.changed, 2, "root + the shadowed child only");
 
     let rep = unlock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.changed, 2, "root + the child's own ACE");
     assert_eq!(lock_state(&shadowed).unwrap(), LockState::Unlocked);
     fs::write(&shadowed, b"y").unwrap();
     fs::write(&plain, b"y").unwrap();
@@ -177,54 +177,90 @@ fn tree_ops_on_a_junction_root_leave_the_target_alone() {
     unlock(&target).unwrap();
 }
 
-/// A NULL DACL allows everyone everything; an ACL holding only our deny allows
-/// nobody anything. The lock used to destroy access, and unlock could not even
-/// read the file back to repair it.
+/// A NULL DACL switches the access check off; no ACL reproduces that, and no
+/// later unlock could prove a reconstructed one came from a NULL DACL. The
+/// item is refused and left exactly as it was.
 #[test]
-fn null_dacl_survives_a_lock_unlock_cycle() {
+fn null_dacl_is_refused_rather_than_reshaped() {
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("f.txt");
     fs::write(&f, b"x").unwrap();
     let _g = Guard(f.clone());
     set_null_dacl(&f);
+    let before = icacls_text(&f);
 
-    assert!(lock(&f).unwrap());
-    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit);
-    assert_eq!(fs::read(&f).unwrap(), b"x", "reading must survive the lock");
-    assert!(fs::write(&f, b"y").is_err(), "writing must be denied");
-
-    assert!(unlock(&f).unwrap());
-    assert_eq!(lock_state(&f).unwrap(), LockState::Unlocked);
+    let err = lock(&f).unwrap_err();
+    assert!(matches!(err.kind, RoKind::NullDacl), "{err}");
+    assert_eq!(icacls_text(&f), before, "the DACL was touched");
     assert_eq!(fs::read(&f).unwrap(), b"x");
     fs::write(&f, b"y").unwrap();
-    // Restored as a NULL DACL, not as an empty one: icacls spells the former
-    // "No permissions are set. All users have full control." and prints an
-    // empty ACE list for the latter.
-    assert!(icacls_text(&f).contains("All users have full control"), "{}", icacls_text(&f));
+    assert!(!fs::metadata(&f).unwrap().permissions().readonly(), "attribute left behind");
 }
 
-/// Same for a directory, through the recursive path. Note that Windows itself
-/// strips inherited ACEs from the children when a directory is given a NULL
-/// DACL, so only the directory's own access is under test here.
+/// Same through the recursive path: the error is reported, nothing changes.
 #[test]
-fn null_dacl_directory_survives_a_lock_unlock_cycle() {
+fn null_dacl_directory_is_refused_by_the_tree_walk() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
     fs::create_dir(&root).unwrap();
     let _g = Guard(root.clone());
     set_null_dacl(&root);
-    assert!(fs::write(root.join("before.txt"), b"b").is_ok());
+    let before = icacls_text(&root);
 
     let rep = lock_tree(&root);
-    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(lock_state(&root).unwrap(), LockState::Explicit);
-    assert!(fs::write(root.join("new.txt"), b"n").is_err(), "creation must be denied");
-
-    let rep = unlock_tree(&root);
-    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(lock_state(&root).unwrap(), LockState::Unlocked);
-    assert!(icacls_text(&root).contains("All users have full control"), "{}", icacls_text(&root));
+    assert_eq!(rep.changed, 0);
+    assert_eq!(rep.errors.len(), 1);
+    assert!(matches!(rep.errors[0].kind, RoKind::NullDacl), "{}", rep.errors[0]);
+    assert_eq!(icacls_text(&root), before);
     fs::write(root.join("new.txt"), b"n").unwrap();
+}
+
+/// The converse: a deliberate `Everyone: FullControl` with no inheritance
+/// flags looks exactly like a reconstructed NULL DACL would, and must come
+/// back untouched. Replacing it with a NULL DACL would hand access to tokens
+/// carrying `Everyone` as deny-only, which the ACE denies.
+#[test]
+fn explicit_full_control_survives_a_lock_unlock_cycle_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"x").unwrap();
+    let _g = Guard(f.clone());
+    icacls(&[f.as_os_str(), "/inheritance:r".as_ref()]);
+    icacls(&[f.as_os_str(), "/grant".as_ref(), "*S-1-1-0:(F)".as_ref()]);
+    let before = icacls_text(&f);
+    assert!(before.contains("Everyone:(F)"), "{before}");
+
+    assert!(lock(&f).unwrap());
+    assert!(fs::write(&f, b"y").is_err());
+    assert!(unlock(&f).unwrap());
+
+    let after = icacls_text(&f);
+    assert!(!after.contains("All users have full control"), "turned into a NULL DACL: {after}");
+    assert_eq!(after, before, "the ACL did not come back unchanged");
+    fs::write(&f, b"y").unwrap();
+}
+
+/// While a parent's lock applies the item reports as parent-locked, because
+/// that is the only removal that can work. The menu relies on this to avoid
+/// offering an unlock that would be refused.
+#[test]
+fn an_item_locked_by_both_reports_as_parent_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    let f = root.join("f.txt");
+    fs::write(&f, b"x").unwrap();
+
+    assert!(lock(&f).unwrap());
+    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit);
+    assert!(lock(&root).unwrap());
+    assert_eq!(lock_state(&f).unwrap(), LockState::Inherited, "own ACE is not removable now");
+    assert!(matches!(unlock(&f).unwrap_err().kind, RoKind::LockedByParent));
+
+    assert!(unlock(&root).unwrap());
+    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit, "removable again");
+    assert!(unlock(&f).unwrap());
 }
 
 /// The materialised NULL-DACL allow carries no inheritance flags, so an
@@ -265,11 +301,13 @@ fn child_is_locked_even_when_the_readonly_attribute_cannot_be_set() {
 
     let rep = lock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
-    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit);
+    // The explicit allow would otherwise win, so a write failing proves the
+    // child got a deny ACE of its own despite the attribute refusing to move.
     assert!(fs::write(&f, b"y").is_err(), "child stayed writable");
 
     let rep = unlock_tree(&root);
     assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.changed, 2, "root + the child's own ACE");
     fs::write(&f, b"y").unwrap();
 }
 
@@ -288,9 +326,10 @@ fn unlocking_a_child_under_a_locked_parent_changes_nothing() {
     assert!(lock(&root).unwrap());
     let err = unlock(&f).unwrap_err();
     assert!(matches!(err.kind, RoKind::LockedByParent), "{err}");
-    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit, "the ACE must survive");
+    assert_eq!(lock_state(&f).unwrap(), LockState::Inherited, "the parent governs now");
 
     assert!(unlock(&root).unwrap());
+    // Returning true proves the child's own ACE survived the refused unlock.
     assert!(unlock(&f).unwrap());
     assert!(!fs::metadata(&f).unwrap().permissions().readonly(), "READONLY stayed behind");
     fs::write(&f, b"y").unwrap();

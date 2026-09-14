@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
@@ -31,7 +33,7 @@ impl Module {
         if n == 0 || n >= buf.len() {
             return None;
         }
-        Some(PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+        Some(PathBuf::from(OsString::from_wide(&buf[..n])))
     }
 
     /// Helper executable expected next to the DLL.

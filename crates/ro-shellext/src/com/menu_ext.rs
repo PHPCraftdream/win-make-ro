@@ -2,12 +2,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG};
+use windows::Win32::Graphics::Gdi::HBITMAP;
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::Registry::HKEY;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, GCS_HELPTEXTW, GCS_VERBW, IContextMenu,
-    IContextMenu_Impl, IShellExtInit, IShellExtInit_Impl,
+    CMF_DEFAULTONLY, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_HELPTEXTW, GCS_VERBW,
+    IContextMenu, IContextMenu_Impl, IShellExtInit, IShellExtInit_Impl, SEE_MASK_UNICODE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     HMENU, InsertMenuW, MENUITEMINFOW, MF_BYPOSITION, MF_GRAYED, MF_STRING, MIIM_BITMAP,
@@ -16,23 +17,39 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HRESULT, PCWSTR, PSTR, Ref, Result, implement};
 
 use super::{Module, hdrop_paths};
-use crate::menu::{Item, Selection, launch, menu_bitmap, plan};
+use crate::menu::{Item, MenuIcon, Selection, launch, plan};
 
 /// One instance per context-menu invocation (Apartment threaded).
 #[implement(IShellExtInit, IContextMenu)]
 pub struct MenuExt {
     paths: Mutex<Vec<PathBuf>>,
     items: Mutex<Vec<Item>>,
+    /// Owned for this object's lifetime, which is at least as long as the menu
+    /// Explorer built from it. Freed on drop, so nothing accumulates.
+    icon: Mutex<Option<MenuIcon>>,
 }
 
 impl MenuExt {
     pub fn new() -> Self {
         Module::object_created();
-        Self { paths: Mutex::new(Vec::new()), items: Mutex::new(Vec::new()) }
+        Self {
+            paths: Mutex::new(Vec::new()),
+            items: Mutex::new(Vec::new()),
+            icon: Mutex::new(None),
+        }
     }
 
     fn lock_paths(&self) -> Vec<PathBuf> {
         self.paths.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// Creates the icon bitmap once per object and hands out its handle.
+    fn bitmap(&self) -> Option<HBITMAP> {
+        let mut slot = self.icon.lock().ok()?;
+        if slot.is_none() {
+            *slot = MenuIcon::new();
+        }
+        slot.as_ref().map(MenuIcon::bitmap)
     }
 
     fn lock_items(&self) -> Vec<Item> {
@@ -96,7 +113,7 @@ impl IContextMenu_Impl for MenuExt_Impl {
             if r.is_err() {
                 return E_FAIL;
             }
-            if let Some(bmp) = menu_bitmap() {
+            if let Some(bmp) = self.bitmap() {
                 let mii = MENUITEMINFOW {
                     cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
                     fMask: MIIM_BITMAP,
@@ -118,10 +135,26 @@ impl IContextMenu_Impl for MenuExt_Impl {
         // SAFETY: COM passes a valid, at least CMINVOKECOMMANDINFO-sized struct.
         let info = unsafe { &*pici };
         let items = self.lock_items();
-        let verb = info.lpVerb.0 as usize;
-        // HIWORD == 0 means an item offset; otherwise an ANSI verb string.
+        // With CMIC_MASK_UNICODE (spelled SEE_MASK_UNICODE here) the caller
+        // passes the larger CMINVOKECOMMANDINFOEX and the verb lives in
+        // lpVerbW; reading lpVerb then picks up an unrelated value.
+        let unicode = info.fMask & SEE_MASK_UNICODE != 0
+            && info.cbSize as usize >= std::mem::size_of::<CMINVOKECOMMANDINFOEX>();
+        let verb = if unicode {
+            // SAFETY: the mask and cbSize together promise the Ex layout.
+            let ex = unsafe { &*(pici as *const CMINVOKECOMMANDINFOEX) };
+            ex.lpVerbW.0 as usize
+        } else {
+            info.lpVerb.0 as usize
+        };
+        // HIWORD == 0 means an item offset; otherwise a verb string.
         let item = if verb >> 16 == 0 {
             items.get(verb & 0xFFFF).copied()
+        } else if unicode {
+            // SAFETY: lpVerbW is a NUL-terminated wide string in that case.
+            let ex = unsafe { &*(pici as *const CMINVOKECOMMANDINFOEX) };
+            let s = unsafe { ex.lpVerbW.to_string() }.unwrap_or_default();
+            items.iter().copied().find(|i| i.verb() == s)
         } else {
             // SAFETY: lpVerb is a NUL-terminated ANSI string in that case.
             let s = unsafe { info.lpVerb.to_string() }.unwrap_or_default();

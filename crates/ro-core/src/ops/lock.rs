@@ -15,21 +15,22 @@ pub fn lock(path: &Path) -> Result<bool> {
     }
     let everyone = Sid::everyone();
     let dacl = Dacl::read(path, &wide)?;
+    // A NULL DACL is not an empty list of permissions: it switches the access
+    // check off entirely, so even a token holding `Everyone` as deny-only is
+    // granted everything. No ACL can reproduce that, and no later unlock could
+    // tell a reconstructed one from a deliberate `Everyone: FullControl`, so
+    // the item is refused rather than silently converted.
+    if dacl.acl.is_null() {
+        return Err(Error::new(path, ErrorKind::NullDacl));
+    }
     let old = aces(dacl.acl);
     if old.iter().any(|a| !a.inherited() && a.is_lock(&everyone)) {
         return Ok(false);
     }
-    // A NULL DACL grants everyone everything; an ACL holding only our deny
-    // would instead refuse everything, so materialise the implied allow.
-    let was_null = dacl.acl.is_null();
-    let extra = ace_size(&everyone) * if was_null { 2 } else { 1 };
-    let mut b = AclBuilder::new(dacl.acl, extra);
+    let mut b = AclBuilder::new(dacl.acl, ace_size(&everyone));
     let io = |e| Error::os(path, e);
     // Canonical order: explicit denies first, so the lock goes to the front.
     b.push_lock(&everyone, meta.is_dir()).map_err(io)?;
-    if was_null {
-        b.push_allow_all(&everyone).map_err(io)?;
-    }
     for a in old.iter() {
         b.push(*a).map_err(io)?;
     }

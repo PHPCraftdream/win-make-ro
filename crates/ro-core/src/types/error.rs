@@ -41,6 +41,11 @@ impl fmt::Display for Error {
             ErrorKind::ReparsePoint => {
                 write!(f, "{}: symlink/junction skipped", self.path.display())
             }
+            ErrorKind::NullDacl => write!(
+                f,
+                "{}: has no access control list at all (NULL DACL); locking it could not be                  undone exactly, so it was left unchanged",
+                self.path.display()
+            ),
         }
     }
 }

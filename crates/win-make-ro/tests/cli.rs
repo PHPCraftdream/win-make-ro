@@ -1,6 +1,8 @@
 //! End-to-end: drives the built executable on a temp tree.
 
+use std::ffi::OsString;
 use std::fs;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -100,4 +102,33 @@ fn usage_errors_exit_2() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("usage:"));
     let o = Command::new(EXE).args(["lock", "--bogus", "x"]).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
+}
+
+/// A name holding an unpaired surrogate must reach the operation intact.
+/// `std::env::args()` panics on such an argument, and a lossy conversion would
+/// point the command at a different file.
+#[test]
+fn a_lone_surrogate_in_the_name_is_handled_not_mangled() {
+    let dir = tempfile::tempdir().unwrap();
+    let odd =
+        dir.path().join(OsString::from_wide(&[b'a' as u16, 0xD800, b'.' as u16, b't' as u16]));
+    fs::write(&odd, b"x").unwrap();
+    let _g = Guard(odd.clone());
+
+    let o = run(&["lock", "--no-elevate"], &[&odd]);
+    assert!(
+        o.status.success(),
+        "exit {:?}: {}",
+        o.status.code(),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(fs::write(&odd, b"y").is_err(), "the wrong file was locked");
+
+    let o = run(&["status"], &[&odd]);
+    assert!(o.status.success());
+    assert!(stdout(&o).starts_with("locked	"), "{}", stdout(&o));
+
+    let o = run(&["unlock", "--no-elevate"], &[&odd]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    fs::write(&odd, b"y").unwrap();
 }

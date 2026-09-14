@@ -10,7 +10,7 @@ pub use aces::aces;
 pub use builder::{AclBuilder, ace_size};
 pub use dacl::Dacl;
 pub use state::{lock_shadowed, state_of};
-pub use write::{write_dacl, write_null_dacl};
+pub use write::write_dacl;
 
 /// `ACCESS_ALLOWED_ACE_TYPE` from winnt.h.
 pub const ALLOW_TYPE: u8 = 0;

@@ -8,7 +8,7 @@ mod cli;
 mod ops;
 
 fn main() {
-    let code = match cli::Args::parse(std::env::args().skip(1)) {
+    let code = match cli::Args::parse(std::env::args_os().skip(1)) {
         Ok(args) => cli::run(args),
         Err(msg) => {
             eprintln!("{msg}\n\n{}", cli::USAGE);

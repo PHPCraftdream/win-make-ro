@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::types::{Error, ErrorKind, Result};
-use crate::win::acl::{AceRef, AclBuilder, Dacl, aces, write_dacl, write_null_dacl};
+use crate::win::acl::{AceRef, AclBuilder, Dacl, aces, write_dacl};
 use crate::win::{Sid, set_readonly_attr, wide_path};
 
 /// Removes the explicit lock ACE (and the READONLY attribute) from one item.
@@ -24,32 +24,20 @@ pub fn unlock(path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let keep: Vec<_> = all.iter().copied().filter(|a| !a.is_lock(&everyone)).collect();
-    write_kept(path, &wide, &dacl, &keep, &everyone)?;
-    if !meta.is_dir()
-        && let Err(e) = set_readonly_attr(path, false)
-    {
-        // Put the lock back rather than leave the item half-unlocked: an
-        // orphaned READONLY attribute reads as "unlocked" yet refuses writes.
-        let _ = write_kept(path, &wide, &dacl, &all, &everyone);
-        return Err(Error::os(path, e));
+    write_kept(path, &wide, &dacl, &keep)?;
+    if !meta.is_dir() {
+        if let Err(e) = set_readonly_attr(path, false) {
+            // Put the lock back rather than leave the item half-unlocked: an
+            // orphaned READONLY attribute reads as "unlocked" yet refuses
+            // writes.
+            let _ = write_kept(path, &wide, &dacl, &all);
+            return Err(Error::os(path, e));
+        }
     }
     Ok(true)
 }
 
-/// Writes `keep` back, or restores a NULL DACL when `keep` is exactly the
-/// allow-everything ACE `lock` materialises for one. That ACE carries no
-/// inheritance flags, which is what tells it apart from an ordinary
-/// inheritable `Everyone: FullControl` that must be preserved as is.
-fn write_kept(
-    path: &Path,
-    wide: &[u16],
-    dacl: &Dacl,
-    keep: &[AceRef],
-    everyone: &Sid,
-) -> Result<()> {
-    if keep.len() == 1 && keep[0].is_allow_all(everyone) {
-        return write_null_dacl(path, wide);
-    }
+fn write_kept(path: &Path, wide: &[u16], dacl: &Dacl, keep: &[AceRef]) -> Result<()> {
     let mut b = AclBuilder::new(dacl.acl, 0);
     for a in keep {
         b.push(*a).map_err(|e| Error::os(path, e))?;

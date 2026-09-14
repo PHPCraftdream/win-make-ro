@@ -1,7 +1,6 @@
 use windows::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, EqualSid, INHERIT_ONLY_ACE, INHERITED_ACE, PSID,
 };
-use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
 use super::{ALLOW_TYPE, DENY_TYPE};
 use crate::types::LOCK_MASK;
@@ -58,16 +57,6 @@ impl AceRef {
         self.header().AceType == DENY_TYPE
             && !self.inherit_only()
             && self.mask() == LOCK_MASK
-            && self.is_for(everyone)
-    }
-
-    /// True for the allow ACE that materialises NULL DACL semantics: explicit,
-    /// full access, and no flags at all, which is what keeps an ordinary
-    /// inheritable `Everyone: FullControl` from matching.
-    pub fn is_allow_all(&self, everyone: &Sid) -> bool {
-        self.is_allow()
-            && self.flags() == 0
-            && self.mask() == FILE_ALL_ACCESS.0
             && self.is_for(everyone)
     }
 }

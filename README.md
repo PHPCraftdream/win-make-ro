@@ -32,14 +32,15 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 - An inherited lock is trusted only when nothing shadows it. Windows evaluates
   a DACL in order, so an explicit allow on a child would win over the deny
   inherited from the parent; such children get an explicit lock of their own.
-- An item with a NULL DACL (everyone may do everything) keeps that meaning: the
-  lock materialises the implied allow alongside the deny, and unlocking puts
-  the NULL DACL back rather than leaving an empty one, which would deny
-  everyone everything.
+- An item with a NULL DACL is refused. A NULL DACL switches the access check
+  off rather than granting a set of rights, no ACL reproduces that, and no
+  later unlock could tell a reconstructed one from a deliberate
+  `Everyone: FullControl`. Such an item is reported and left untouched.
 - Items that are locked through a parent show a disabled entry *Read only
   (inherited from parent folder)*; unlock the parent instead. Removing an
   item's own ACE while a parent's lock still applies is refused, since it
-  could not make the item writable anyway.
+  could not make the item writable anyway — an item carrying both its own and
+  an inherited lock therefore reports as parent-locked.
 - Symlinks and junctions are never touched or descended.
 - Changing a DACL needs `WRITE_DAC`. The owner always has it, so own files need
   no elevation. On `ERROR_ACCESS_DENIED` the helper re-launches itself through
@@ -83,6 +84,8 @@ Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with
 
 ```
 cargo test --workspace
+cargo test --workspace --release   # the COM tests load a built DLL
+cargo +1.85 check --workspace --all-targets
 ```
 
 - `ro-core/tests`: real ACLs in a temp directory (files, folders, inheritance,

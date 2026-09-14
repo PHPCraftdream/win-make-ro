@@ -4,9 +4,8 @@ use windows::Win32::Security::{
     ACE_HEADER, ACE_REVISION, ACL, ACL_REVISION, AddAce, CONTAINER_INHERIT_ACE, InitializeAcl,
     OBJECT_INHERIT_ACE,
 };
-use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
-use super::{ALLOW_TYPE, AceRef, DENY_TYPE};
+use super::{AceRef, DENY_TYPE};
 use crate::types::LOCK_MASK;
 use crate::win::Sid;
 
@@ -77,11 +76,5 @@ impl AclBuilder {
     pub fn push_lock(&mut self, everyone: &Sid, inheritable: bool) -> io::Result<()> {
         let flags = if inheritable { OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0 } else { 0 };
         self.push_ace(DENY_TYPE, LOCK_MASK, everyone, flags as u8)
-    }
-
-    /// Appends an allow-everything ACE for `Everyone`, the explicit equivalent
-    /// of a NULL DACL. Never inheritable: a NULL DACL propagates nothing.
-    pub fn push_allow_all(&mut self, everyone: &Sid) -> io::Result<()> {
-        self.push_ace(ALLOW_TYPE, FILE_ALL_ACCESS.0, everyone, 0)
     }
 }
