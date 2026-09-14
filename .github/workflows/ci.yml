@@ -35,7 +35,34 @@ jobs:
           test "$cargo_version" = "$scoop_version"
       - name: The npm scripts must parse
         run: |
-          for f in npm/bin/*.js npm/scripts/*.js; do node --check "$f"; done
+          for f in npm/bin/*.js npm/scripts/*.js npm/test/*.js; do node --check "$f"; done
+      - name: The npm packaging contract must hold
+        run: node npm/test/lifecycle.test.js
+      - name: The workflows must be valid
+        uses: raven-actions/actionlint@v2
+      - name: The PowerShell in the workflows must parse
+        shell: bash
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import pathlib, yaml
+          out = pathlib.Path("/tmp/ps"); out.mkdir(exist_ok=True)
+          for wf in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+              doc = yaml.safe_load(wf.read_text())
+              for job in doc["jobs"].values():
+                  shell = job.get("defaults", {}).get("run", {}).get("shell")
+                  for i, step in enumerate(job.get("steps", [])):
+                      if "run" in step and step.get("shell", shell) == "pwsh":
+                          (out / f"{wf.stem}-{job.get('name', 'job')}-{i}.ps1").write_text(step["run"])
+          EOF
+          for f in /tmp/ps/*.ps1; do
+            [ -e "$f" ] || continue
+            pwsh -NoProfile -Command "
+              \$e = \$null
+              [System.Management.Automation.Language.Parser]::ParseFile('$f', [ref]\$null, [ref]\$e) | Out-Null
+              if (\$e.Count -gt 0) { \$e | ForEach-Object { Write-Error \$_.Message }; exit 1 }
+              Write-Host 'parse ok: $f'"
+          done
 
   msrv:
     runs-on: windows-latest

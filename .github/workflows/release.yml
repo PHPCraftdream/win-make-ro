@@ -12,6 +12,8 @@ on:
 permissions:
   contents: write
 
+# Every step below is idempotent: a run that failed halfway can simply be
+# repeated, and one that already did its part reports so and moves on.
 jobs:
   release:
     runs-on: windows-latest
@@ -36,34 +38,23 @@ jobs:
             throw "tag $tag does not match Cargo.toml version $($manifest.version)"
           }
           $name = "win-make-ro-$version-x86_64-pc-windows-msvc"
-          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
           Copy-Item target/release/win-make-ro.exe "dist/$name/"
           Copy-Item target/release/ro_shellext.dll "dist/$name/"
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist/$name/"
-          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip" -Force
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+          "TAG=$tag" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "VERSION=$version" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "ARCHIVE=dist/$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "SHA256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
         env:
           INPUT_TAG: ${{ inputs.tag }}
 
-      - name: Stage the npm package
-        shell: pwsh
-        run: |
-          Copy-Item target/release/win-make-ro.exe npm/vendor/
-          Copy-Item target/release/ro_shellext.dll npm/vendor/
-          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE npm/
-          $pkg = Get-Content npm/package.json -Raw | ConvertFrom-Json
-          if ($pkg.version -ne $env:VERSION) {
-            throw "npm/package.json is at $($pkg.version), the tag says $env:VERSION"
-          }
-
       - name: Publish the release
         shell: pwsh
         run: |
-          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF_NAME }
           $notes = @"
           SHA-256 of the archive: $env:SHA256
 
@@ -77,38 +68,76 @@ jobs:
               npm install -g win-make-ro
 
           Either one registers the Explorer context menu for the current user.
+          npm cannot run scripts on uninstall, so remove the registration with
+          ``win-make-ro uninstall`` before ``npm uninstall -g win-make-ro``.
           "@
-          gh release create $tag $env:ARCHIVE "$env:ARCHIVE.sha256" `
-            --title $tag --notes $notes
+          gh release view $env:TAG 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $env:TAG exists; refreshing its assets"
+            gh release upload $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" --clobber
+          } else {
+            gh release create $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" `
+              --title $env:TAG --notes $notes
+          }
         env:
-          INPUT_TAG: ${{ inputs.tag }}
           GH_TOKEN: ${{ github.token }}
 
-      - name: Point the Scoop manifest at the new release
-        shell: pwsh
-        run: |
-          $path = "bucket/win-make-ro.json"
-          $m = Get-Content $path -Raw | ConvertFrom-Json
-          $name = "win-make-ro-$env:VERSION-x86_64-pc-windows-msvc.zip"
-          $m.version = $env:VERSION
-          $m.architecture."64bit".url =
-            "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
-          $m.architecture."64bit".hash = $env:SHA256
-          $m | ConvertTo-Json -Depth 10 | Set-Content $path -Encoding utf8
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add $path
-          if (git diff --cached --quiet) { exit 0 }
-          git commit -m "scoop: point the manifest at v$env:VERSION"
-          git push origin HEAD:${{ github.event.repository.default_branch }}
-
+      # Before the branch switch below, so the package is published from the
+      # tagged tree rather than from whatever the default branch holds now.
       - name: Publish to npm
         if: ${{ env.NPM_TOKEN != '' }}
         shell: pwsh
         working-directory: npm
         run: |
+          $published = npm view "win-make-ro@$env:VERSION" version 2>$null
+          if ($published) {
+            Write-Host "win-make-ro@$env:VERSION is already on the registry; skipping"
+            exit 0
+          }
+          Copy-Item ../target/release/win-make-ro.exe vendor/
+          Copy-Item ../target/release/ro_shellext.dll vendor/
+          Copy-Item ../README.md, ../LICENSE-MIT, ../LICENSE-APACHE .
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($pkg.version -ne $env:VERSION) {
+            throw "npm/package.json is at $($pkg.version), the tag says $env:VERSION"
+          }
           "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Out-File -Encoding ascii .npmrc
-          npm publish --access public
-          Remove-Item .npmrc
+          try { npm publish --access public } finally { Remove-Item .npmrc -ErrorAction Ignore }
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The checkout above is a detached tag. Committing the manifest there and
+      # pushing to the default branch is rejected the moment that branch has
+      # moved on, so the edit is made on top of the branch as it is right now.
+      - name: Point the Scoop manifest at the new release
+        shell: pwsh
+        run: |
+          $branch = if ($env:DEFAULT_BRANCH) { $env:DEFAULT_BRANCH } else { "main" }
+          $path = "bucket/win-make-ro.json"
+          $name = "win-make-ro-$env:VERSION-x86_64-pc-windows-msvc.zip"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          foreach ($attempt in 1..3) {
+            git fetch --quiet origin $branch
+            git checkout --quiet -B $branch "origin/$branch"
+            $m = Get-Content $path -Raw | ConvertFrom-Json
+            $m.version = $env:VERSION
+            $m.architecture."64bit".url =
+              "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
+            $m.architecture."64bit".hash = $env:SHA256
+            $m | ConvertTo-Json -Depth 10 | Set-Content $path -Encoding utf8
+            git add $path
+            git diff --cached --quiet
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "the manifest already points at v$env:VERSION"
+              exit 0
+            }
+            git commit --quiet -m "scoop: point the manifest at v$env:VERSION"
+            git push origin $branch
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "push rejected, attempt $attempt; rebuilding on the new tip"
+            git reset --hard "origin/$branch"
+          }
+          throw "could not update the Scoop manifest on $branch"
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

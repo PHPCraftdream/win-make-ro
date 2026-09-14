@@ -76,10 +76,32 @@ npm install -g win-make-ro
 The npm package ships the binaries and is marked `win32`/`x64`; a project-local
 install deliberately skips registration, so run `npx win-make-ro install` for
 that case. Set `WIN_MAKE_RO_SKIP_REGISTER=1` to suppress it entirely.
-Uninstalling either package removes the registry entries first.
 
 A release also carries a zip with both binaries and a `.sha256` beside it, if
 you would rather unpack it yourself and run `win-make-ro.exe install`.
+
+## Removal
+
+Scoop unregisters the context menu for you. npm cannot: since version 7 it
+runs no scripts on uninstall, so unregister first, while the executable is
+still there.
+
+```
+win-make-ro uninstall
+npm uninstall -g win-make-ro
+```
+
+If the package is already gone, the leftovers are three keys under
+`HKCU\Software\Classes`, and deleting them by hand is safe:
+
+```
+reg delete "HKCU\Software\Classes\CLSID\{7A3C1F0E-5B2D-4E8A-9C61-0D4F2B7E9A11}" /f
+reg delete "HKCU\Software\Classes\*\shellex\ContextMenuHandlers\WinMakeRO" /f
+reg delete "HKCU\Software\Classes\Directory\shellex\ContextMenuHandlers\WinMakeRO" /f
+```
+
+Until they are removed Explorer keeps trying to load a DLL that is no longer
+there, which costs nothing but shows no menu items either.
 
 ## Build, install, remove
 

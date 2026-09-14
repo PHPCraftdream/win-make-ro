@@ -40,7 +40,6 @@
     "LICENSE-APACHE"
   ],
   "scripts": {
-    "postinstall": "node scripts/postinstall.js",
-    "preuninstall": "node scripts/preuninstall.js"
+    "postinstall": "node scripts/postinstall.js"
   }
 }

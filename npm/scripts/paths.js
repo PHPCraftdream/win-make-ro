@@ -8,6 +8,18 @@ const path = require("node:path");
 
 const VENDOR = path.join(__dirname, "..", "vendor");
 
+/** npm 7 and later never run uninstall scripts, so the registry entries this
+ * package writes cannot be cleaned up on the way out. The order below is the
+ * only one that leaves nothing behind, and it is printed at install time so
+ * it is known before it is needed.
+ * See https://docs.npmjs.com/cli/v11/using-npm/scripts/#a-note-on-a-lack-of-npm-uninstall-scripts */
+const REMOVAL_NOTICE =
+  "To remove win-make-ro, unregister first, then delete the package:\n" +
+  "    win-make-ro uninstall\n" +
+  "    npm uninstall -g win-make-ro\n" +
+  "npm cannot do the first step for you. If the package is already gone, see\n" +
+  "the Removal section of the README for the registry keys to delete.";
+
 function exe() {
   return path.join(VENDOR, "win-make-ro.exe");
 }
@@ -24,4 +36,4 @@ function shouldRegister() {
   return process.env.npm_config_global === "true";
 }
 
-module.exports = { VENDOR, exe, isWindows, shouldRegister };
+module.exports = { VENDOR, REMOVAL_NOTICE, exe, isWindows, shouldRegister };
