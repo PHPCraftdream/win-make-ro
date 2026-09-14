@@ -38,6 +38,9 @@ jobs:
           for f in npm/bin/*.js npm/scripts/*.js npm/test/*.js; do node --check "$f"; done
       - name: The npm packaging contract must hold
         run: node npm/test/lifecycle.test.js
+      - name: The release scripts must hold
+        run: |
+          for t in .github/scripts/*.tests.ps1; do pwsh -File "$t"; done
       - name: The workflows must be valid
         uses: raven-actions/actionlint@v2
       - name: The PowerShell in the workflows must parse
@@ -55,6 +58,7 @@ jobs:
                       if "run" in step and step.get("shell", shell) == "pwsh":
                           (out / f"{wf.stem}-{job.get('name', 'job')}-{i}.ps1").write_text(step["run"])
           EOF
+          cp .github/scripts/*.ps1 /tmp/ps/
           for f in /tmp/ps/*.ps1; do
             [ -e "$f" ] || continue
             pwsh -NoProfile -Command "

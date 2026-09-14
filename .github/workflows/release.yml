@@ -77,27 +77,54 @@ jobs:
           npm cannot run scripts on uninstall, so remove the registration with
           ``win-make-ro uninstall`` before ``npm uninstall -g win-make-ro``.
           "@
+          # A failing native command does not stop a PowerShell script, and the
+          # steps that follow would publish against an archive that never
+          # arrived, so every gh call is checked.
+          function Assert-Ok([string]$What) {
+            if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
+          }
           $assetName = Split-Path $env:ARCHIVE -Leaf
+          $sumName = "$assetName.sha256"
           $existing = gh release view $env:TAG --json assets 2>$null
-          if ($LASTEXITCODE -ne 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $published = @()
+          if ($releaseExists) {
+            $published = @(($existing | ConvertFrom-Json).assets | ForEach-Object { $_.name })
+          }
+          # What to upload, and what to leave alone, is decided by a script of its
+          # own so the reruns it has to survive can be tested: see .github/scripts.
+          $plan = & .github/scripts/plan-release-assets.ps1 `
+            -ArchiveName $assetName -PublishedAssets $published `
+            -ReleaseExists:$releaseExists
+          if ($plan.Action -eq 'create') {
             gh release create $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" `
               --title $env:TAG --notes $notes
+            Assert-Ok "creating release $env:TAG"
             exit 0
           }
-          $assets = @(($existing | ConvertFrom-Json).assets | ForEach-Object { $_.name })
-          if ($assets -notcontains $assetName) {
-            Write-Host "release $env:TAG exists but has no archive; uploading this build"
-            gh release upload $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256"
+          if ($plan.Action -eq 'upload') {
+            Write-Host "release $env:TAG has no archive; uploading this build"
+            gh release upload $env:TAG $env:ARCHIVE "$env:ARCHIVE.sha256" --clobber
+            Assert-Ok "uploading the archive to $env:TAG"
             exit 0
           }
-          # Replacing a published archive would invalidate every manifest and
-          # release note that already quotes its hash, so the published bytes
-          # win and the rest of the run follows their checksum.
+          # Reuse: replacing a published archive would invalidate every manifest and
+          # release note that already quotes its hash, so the published bytes win and
+          # the rest of the run follows their checksum.
           New-Item -ItemType Directory -Path dist/published -Force | Out-Null
           gh release download $env:TAG --pattern $assetName --dir dist/published --clobber
+          Assert-Ok "downloading $assetName from $env:TAG"
           $hash = (Get-FileHash "dist/published/$assetName" -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne $env:SHA256) {
             Write-Host "this build differs from the published archive; keeping the published one"
+          }
+          # An earlier run may have uploaded the archive and then failed before the
+          # checksum; that file is rebuilt from the published archive, not this build.
+          if ($plan.RestoreChecksum) {
+            Write-Host "the checksum file is missing; restoring it from the published archive"
+            "$hash  $assetName" | Out-File -Encoding ascii "dist/published/$sumName"
+            gh release upload $env:TAG "dist/published/$sumName" --clobber
+            Assert-Ok "uploading $sumName to $env:TAG"
           }
           Write-Host "reusing the archive already on release $env:TAG ($hash)"
           "SHA256=$hash" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
@@ -125,6 +152,9 @@ jobs:
           }
           "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Out-File -Encoding ascii .npmrc
           try { npm publish --access public } finally { Remove-Item .npmrc -ErrorAction Ignore }
+          # The cleanup above would otherwise become the step's exit code and
+          # hide a failed publish.
+          if ($LASTEXITCODE -ne 0) { throw "npm publish failed with exit code $LASTEXITCODE" }
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -139,31 +169,27 @@ jobs:
           $name = "win-make-ro-$env:VERSION-x86_64-pc-windows-msvc.zip"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
           foreach ($attempt in 1..3) {
             git fetch --quiet origin $branch
+            if ($LASTEXITCODE -ne 0) { throw "fetching $branch failed" }
             git checkout --quiet -B $branch "origin/$branch"
-            $m = Get-Content $path -Raw | ConvertFrom-Json
-            # Re-running an older tag must not walk the manifest backwards.
-            try {
-              if ([version]$m.version -gt [version]$env:VERSION) {
-                Write-Host "the manifest is at $($m.version); not replacing it with $env:VERSION"
-                exit 0
-              }
-            } catch {
-              Write-Host "cannot compare $($m.version) with $env:VERSION; updating anyway"
-            }
-            $m.version = $env:VERSION
-            $m.architecture."64bit".url =
-              "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name"
-            $m.architecture."64bit".hash = $env:SHA256
-            $m | ConvertTo-Json -Depth 10 | Set-Content $path -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw "checking out $branch failed" }
+            # The downgrade guard, and the SemVer comparison it needs, live in a
+            # script of their own with tests: see .github/scripts.
+            & .github/scripts/update-scoop-manifest.ps1 `
+              -Path $path -Version $env:VERSION -Url $url -Hash $env:SHA256 | Out-Null
             git add $path
+            if ($LASTEXITCODE -ne 0) { throw "staging $path failed" }
             git diff --cached --quiet
             if ($LASTEXITCODE -eq 0) {
-              Write-Host "the manifest already points at v$env:VERSION"
+              # Either the manifest already says this, or the guard refused to move
+              # it backwards; both leave the file untouched.
+              Write-Host "nothing to commit for the manifest"
               exit 0
             }
             git commit --quiet -m "scoop: point the manifest at v$env:VERSION"
+            if ($LASTEXITCODE -ne 0) { throw "committing the manifest failed" }
             git push origin $branch
             if ($LASTEXITCODE -eq 0) { exit 0 }
             Write-Host "push rejected, attempt $attempt; rebuilding on the new tip"
