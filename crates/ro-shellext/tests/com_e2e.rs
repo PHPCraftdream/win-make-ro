@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ro_core::{LockState, lock_state, unlock_tree};
 use windows::Win32::Foundation::{HMODULE, S_FALSE, S_OK};
@@ -24,6 +25,9 @@ use windows::core::{GUID, HRESULT, Interface, PCSTR, PCWSTR, PSTR};
 
 const CLSID: GUID = GUID::from_u128(0x7A3C1F0E_5B2D_4E8A_9C61_0D4F2B7E9A11);
 const ID_FIRST: u32 = 1000;
+
+// Tests share the DLL's process-wide object and server-lock counts.
+static COM_TESTS: Mutex<()> = Mutex::new(());
 
 type GetClassObject =
     unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut core::ffi::c_void) -> HRESULT;
@@ -192,6 +196,7 @@ impl Drop for Guard {
 
 #[test]
 fn full_cycle_through_com() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: first COM call on this thread.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     // SAFETY: test-only switch read by the DLL; set before any COM object exists.
@@ -251,6 +256,7 @@ fn full_cycle_through_com() {
 /// keep the DLL loaded on its own. Both used to report "safe to unload".
 #[test]
 fn unload_is_refused_while_the_factory_or_a_server_lock_is_held() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: first COM call on this thread.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let dll = Dll::load();
@@ -276,6 +282,7 @@ fn unload_is_refused_while_the_factory_or_a_server_lock_is_held() {
 
 #[test]
 fn initialize_without_selection_fails() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: first COM call on this thread.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let dll = Dll::load();
