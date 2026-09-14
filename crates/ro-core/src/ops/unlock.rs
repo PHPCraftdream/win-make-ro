@@ -1,12 +1,13 @@
 use std::path::Path;
 
-use crate::types::{Error, ErrorKind, LockState, Result};
-use crate::win::acl::{AclBuilder, Dacl, aces, state_of, write_dacl, write_null_dacl};
+use crate::types::{Error, ErrorKind, Result};
+use crate::win::acl::{AceRef, AclBuilder, Dacl, aces, write_dacl, write_null_dacl};
 use crate::win::{Sid, set_readonly_attr, wide_path};
 
 /// Removes the explicit lock ACE (and the READONLY attribute) from one item.
-/// `Ok(false)` when there was none; `LockedByParent` if only an inherited lock
-/// exists.
+/// `Ok(false)` when there was none; `LockedByParent` while a parent's lock is
+/// still in force, since removing the item's own ACE could not make it
+/// writable and would only desynchronise the ACE from the attribute.
 pub fn unlock(path: &Path) -> Result<bool> {
     let wide = wide_path(path).map_err(|e| Error::os(path, e))?;
     let meta = std::fs::symlink_metadata(path).map_err(|e| Error::os(path, e))?;
@@ -15,26 +16,43 @@ pub fn unlock(path: &Path) -> Result<bool> {
     }
     let everyone = Sid::everyone();
     let dacl = Dacl::read(path, &wide)?;
-    match state_of(&dacl, &everyone) {
-        LockState::Unlocked => return Ok(false),
-        LockState::Inherited => return Err(Error::new(path, ErrorKind::LockedByParent)),
-        LockState::Explicit => {}
+    let all = aces(dacl.acl);
+    if all.iter().any(|a| a.inherited() && a.is_lock(&everyone)) {
+        return Err(Error::new(path, ErrorKind::LockedByParent));
     }
-    let keep: Vec<_> =
-        aces(dacl.acl).into_iter().filter(|a| a.inherited() || !a.is_lock(&everyone)).collect();
-    // Exactly the allow-everything ACE `lock` writes for a NULL DACL: restore
-    // the NULL DACL rather than leave a weaker explicit equivalent behind.
-    if keep.len() == 1 && keep[0].is_allow_all(&everyone) {
-        write_null_dacl(path, &wide)?;
-    } else {
-        let mut b = AclBuilder::new(dacl.acl, 0);
-        for a in keep {
-            b.push(a).map_err(|e| Error::os(path, e))?;
-        }
-        write_dacl(path, &wide, b.acl())?;
+    if !all.iter().any(|a| a.is_lock(&everyone)) {
+        return Ok(false);
     }
-    if !meta.is_dir() {
-        set_readonly_attr(path, false).map_err(|e| Error::os(path, e))?;
+    let keep: Vec<_> = all.iter().copied().filter(|a| !a.is_lock(&everyone)).collect();
+    write_kept(path, &wide, &dacl, &keep, &everyone)?;
+    if !meta.is_dir()
+        && let Err(e) = set_readonly_attr(path, false)
+    {
+        // Put the lock back rather than leave the item half-unlocked: an
+        // orphaned READONLY attribute reads as "unlocked" yet refuses writes.
+        let _ = write_kept(path, &wide, &dacl, &all, &everyone);
+        return Err(Error::os(path, e));
     }
     Ok(true)
+}
+
+/// Writes `keep` back, or restores a NULL DACL when `keep` is exactly the
+/// allow-everything ACE `lock` materialises for one. That ACE carries no
+/// inheritance flags, which is what tells it apart from an ordinary
+/// inheritable `Everyone: FullControl` that must be preserved as is.
+fn write_kept(
+    path: &Path,
+    wide: &[u16],
+    dacl: &Dacl,
+    keep: &[AceRef],
+    everyone: &Sid,
+) -> Result<()> {
+    if keep.len() == 1 && keep[0].is_allow_all(everyone) {
+        return write_null_dacl(path, wide);
+    }
+    let mut b = AclBuilder::new(dacl.acl, 0);
+    for a in keep {
+        b.push(*a).map_err(|e| Error::os(path, e))?;
+    }
+    write_dacl(path, wide, b.acl())
 }

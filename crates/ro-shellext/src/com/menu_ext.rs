@@ -69,13 +69,17 @@ impl IContextMenu_Impl for MenuExt_Impl {
         hmenu: HMENU,
         indexmenu: u32,
         idcmdfirst: u32,
-        _idcmdlast: u32,
+        idcmdlast: u32,
         uflags: u32,
     ) -> HRESULT {
         if uflags & CMF_DEFAULTONLY != 0 {
             return HRESULT(0);
         }
-        let items = plan(&Selection::inspect(&self.lock_paths()));
+        // idCmdLast is inclusive; using an id past it would collide with
+        // another handler's commands. A last below first leaves no room.
+        let room = idcmdlast.checked_sub(idcmdfirst).map_or(0, |n| n.saturating_add(1) as usize);
+        let mut items = plan(&Selection::inspect(&self.lock_paths()));
+        items.truncate(room);
         for (i, item) in items.iter().enumerate() {
             let text: Vec<u16> = item.text().encode_utf16().chain(Some(0)).collect();
             let flags = if item.enabled() { MF_STRING } else { MF_STRING | MF_GRAYED };
@@ -136,14 +140,18 @@ impl IContextMenu_Impl for MenuExt_Impl {
         pszname: PSTR,
         cchmax: u32,
     ) -> Result<()> {
+        // cchMax counts characters of the caller's buffer, terminator
+        // included, so nothing at all may be written when it is zero.
+        if cchmax == 0 {
+            return Err(E_INVALIDARG.into());
+        }
         let item = self.lock_items().get(idcmd).copied().ok_or(E_INVALIDARG)?;
         let text = match utype {
             GCS_VERBW => item.verb(),
             GCS_HELPTEXTW => item.help(),
             _ => return Err(E_INVALIDARG.into()),
         };
-        let wide: Vec<u16> =
-            text.encode_utf16().take(cchmax.saturating_sub(1) as usize).chain(Some(0)).collect();
+        let wide: Vec<u16> = text.encode_utf16().take(cchmax as usize - 1).chain(Some(0)).collect();
         // SAFETY: for the *W types pszname is a u16 buffer of cchmax chars.
         unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), pszname.0 as *mut u16, wide.len()) };
         Ok(())

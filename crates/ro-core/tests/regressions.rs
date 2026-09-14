@@ -3,7 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ro_core::{LockState, lock, lock_state, lock_tree, unlock, unlock_tree, wide_path};
+use ro_core::{
+    ErrorKind as RoKind, LockState, lock, lock_state, lock_tree, unlock, unlock_tree, wide_path,
+};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
 use windows::Win32::Security::DACL_SECURITY_INFORMATION;
@@ -30,6 +32,22 @@ fn icacls_text(path: &Path) -> String {
 fn icacls(args: &[&std::ffi::OsStr]) {
     let out = std::process::Command::new("icacls").args(args).output().expect("icacls");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+}
+
+/// icacls expands its `(W)` shorthand to FILE_GENERIC_WRITE, so an ACE with
+/// exactly LOCK_MASK has to be built through the .NET ACL API instead.
+fn deny_inherit_only_lock_mask(path: &Path) {
+    let script = format!(
+        "$p='{}'; $acl = Get-Acl $p;          $sid = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0');          $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid,            [System.Security.AccessControl.FileSystemRights]{},            'ContainerInherit,ObjectInherit', 'InheritOnly', 'Deny');          $acl.AddAccessRule($rule); Set-Acl -Path $p -AclObject $acl",
+        path.display(),
+        ro_core::LOCK_MASK,
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("powershell");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 fn junction(link: &Path, target: &Path) {
@@ -167,4 +185,92 @@ fn null_dacl_directory_survives_a_lock_unlock_cycle() {
     assert_eq!(lock_state(&root).unwrap(), LockState::Unlocked);
     assert!(icacls_text(&root).contains("All users have full control"), "{}", icacls_text(&root));
     fs::write(root.join("new.txt"), b"n").unwrap();
+}
+
+/// The materialised NULL-DACL allow carries no inheritance flags, so an
+/// ordinary inheritable `Everyone:(F)` must not be mistaken for it: restoring
+/// a NULL DACL there strips the children of every permission they inherit.
+#[test]
+fn inheritable_full_control_is_not_mistaken_for_a_null_dacl() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    icacls(&[root.as_os_str(), "/inheritance:r".as_ref()]);
+    icacls(&[root.as_os_str(), "/grant".as_ref(), "*S-1-1-0:(OI)(CI)(F)".as_ref()]);
+    let f = root.join("f.txt");
+    fs::write(&f, b"x").unwrap();
+
+    assert!(lock(&root).unwrap());
+    assert!(unlock(&root).unwrap());
+
+    assert_eq!(fs::read(&f).unwrap(), b"x", "child lost its inherited permissions");
+    fs::write(&f, b"y").unwrap();
+    assert!(icacls_text(&root).contains("(OI)(CI)(F)"), "{}", icacls_text(&root));
+}
+
+/// Under a locked parent the inherited deny already blocks WRITE_ATTRIBUTES,
+/// so setting the READONLY attribute fails. That must not stop the child from
+/// getting the deny ACE it needs.
+#[test]
+fn child_is_locked_even_when_the_readonly_attribute_cannot_be_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    let f = root.join("f.txt");
+    fs::write(&f, b"x").unwrap();
+    // Write data only: narrower than (W), and enough to shadow the lock.
+    icacls(&[f.as_os_str(), "/grant".as_ref(), "*S-1-1-0:(WD)".as_ref()]);
+
+    let rep = lock_tree(&root);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit);
+    assert!(fs::write(&f, b"y").is_err(), "child stayed writable");
+
+    let rep = unlock_tree(&root);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    fs::write(&f, b"y").unwrap();
+}
+
+/// Unlocking a child whose parent is locked cannot make it writable, and used
+/// to strip the ACE while leaving the READONLY attribute stuck for good.
+#[test]
+fn unlocking_a_child_under_a_locked_parent_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    let f = root.join("f.txt");
+    fs::write(&f, b"x").unwrap();
+
+    assert!(lock(&f).unwrap());
+    assert!(lock(&root).unwrap());
+    let err = unlock(&f).unwrap_err();
+    assert!(matches!(err.kind, RoKind::LockedByParent), "{err}");
+    assert_eq!(lock_state(&f).unwrap(), LockState::Explicit, "the ACE must survive");
+
+    assert!(unlock(&root).unwrap());
+    assert!(unlock(&f).unwrap());
+    assert!(!fs::metadata(&f).unwrap().permissions().readonly(), "READONLY stayed behind");
+    fs::write(&f, b"y").unwrap();
+}
+
+/// An INHERIT_ONLY ACE does not apply to the object carrying it, so a folder
+/// holding one is not locked and must not be reported as such.
+#[test]
+fn inherit_only_ace_does_not_count_as_a_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    deny_inherit_only_lock_mask(&root);
+
+    assert_eq!(lock_state(&root).unwrap(), LockState::Unlocked, "IO ACE is not a lock");
+    fs::create_dir(root.join("sub")).expect("creation is not actually blocked");
+    // Locking still works and adds an ACE that does apply to the folder.
+    assert!(lock(&root).unwrap());
+    assert_eq!(lock_state(&root).unwrap(), LockState::Explicit);
+    assert!(fs::create_dir(root.join("sub2")).is_err());
+    assert!(unlock(&root).unwrap());
 }

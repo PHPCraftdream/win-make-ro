@@ -1,4 +1,6 @@
-use windows::Win32::Security::{ACCESS_ALLOWED_ACE, ACE_HEADER, EqualSid, INHERITED_ACE, PSID};
+use windows::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, EqualSid, INHERIT_ONLY_ACE, INHERITED_ACE, PSID,
+};
 use windows::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
 
 use super::{ALLOW_TYPE, DENY_TYPE};
@@ -17,8 +19,19 @@ impl AceRef {
         unsafe { *self.ptr }
     }
 
+    pub fn flags(&self) -> u32 {
+        u32::from(self.header().AceFlags)
+    }
+
     pub fn inherited(&self) -> bool {
-        u32::from(self.header().AceFlags) & INHERITED_ACE.0 != 0
+        self.flags() & INHERITED_ACE.0 != 0
+    }
+
+    /// An INHERIT_ONLY ACE is propagated to children but does not apply to the
+    /// object holding it. See
+    /// <https://learn.microsoft.com/en-us/windows/win32/secauthz/ace-inheritance-rules>.
+    pub fn inherit_only(&self) -> bool {
+        self.flags() & INHERIT_ONLY_ACE.0 != 0
     }
 
     pub fn is_allow(&self) -> bool {
@@ -39,15 +52,21 @@ impl AceRef {
         }
     }
 
-    /// True for a lock ACE (explicit or inherited): deny, Everyone, exact mask.
+    /// True for a lock ACE (explicit or inherited) that applies to this very
+    /// object: deny, Everyone, exact mask, not inherit-only.
     pub fn is_lock(&self, everyone: &Sid) -> bool {
-        self.header().AceType == DENY_TYPE && self.mask() == LOCK_MASK && self.is_for(everyone)
+        self.header().AceType == DENY_TYPE
+            && !self.inherit_only()
+            && self.mask() == LOCK_MASK
+            && self.is_for(everyone)
     }
 
-    /// True for the allow ACE that materialises NULL DACL semantics.
+    /// True for the allow ACE that materialises NULL DACL semantics: explicit,
+    /// full access, and no flags at all, which is what keeps an ordinary
+    /// inheritable `Everyone: FullControl` from matching.
     pub fn is_allow_all(&self, everyone: &Sid) -> bool {
         self.is_allow()
-            && !self.inherited()
+            && self.flags() == 0
             && self.mask() == FILE_ALL_ACCESS.0
             && self.is_for(everyone)
     }

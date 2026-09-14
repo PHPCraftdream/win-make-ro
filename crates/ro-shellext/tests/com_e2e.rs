@@ -18,8 +18,8 @@ use windows::Win32::UI::Shell::{
     IShellExtInit, SHCreateShellItemArrayFromIDLists,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, GetMenuState, GetMenuStringW,
-    MENUITEMINFOW, MF_BYPOSITION, MF_GRAYED, MIIM_BITMAP,
+    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, GetMenuItemInfoW, GetMenuState,
+    GetMenuStringW, MENUITEMINFOW, MF_BYPOSITION, MF_GRAYED, MIIM_BITMAP,
 };
 use windows::core::{GUID, HRESULT, Interface, PCSTR, PCWSTR, PSTR};
 
@@ -118,6 +118,29 @@ impl Drop for Menu {
         // SAFETY: handle from CreatePopupMenu.
         let _ = unsafe { DestroyMenu(self.0) };
     }
+}
+
+/// Same as `query`, but with an explicit id range.
+fn query_range(ctx: &IContextMenu, first: u32, last: u32) -> Vec<(String, bool, u32)> {
+    // SAFETY: plain menu creation.
+    let menu = Menu(unsafe { CreatePopupMenu() }.unwrap());
+    // SAFETY: menu is live; id range is ours.
+    let hr = unsafe { ctx.QueryContextMenu(menu.0, 0, first, last, 0) };
+    assert!(hr.is_ok(), "{hr:?}");
+    let n = hr.0 as usize;
+    // SAFETY: menu is live.
+    assert_eq!(unsafe { GetMenuItemCount(Some(menu.0)) } as usize, n);
+    (0..n as u32)
+        .map(|pos| {
+            let mut buf = [0u16; 128];
+            // SAFETY: buf is writable; pos < item count.
+            let len =
+                unsafe { GetMenuStringW(menu.0, pos, Some(&mut buf), MF_BYPOSITION) } as usize;
+            let state = unsafe { GetMenuState(menu.0, pos, MF_BYPOSITION) };
+            let id = unsafe { GetMenuItemID(menu.0, pos as i32) };
+            (String::from_utf16_lossy(&buf[..len]), state & MF_GRAYED.0 == 0, id)
+        })
+        .collect()
 }
 
 /// (label, enabled) per inserted item.
@@ -278,6 +301,49 @@ fn unload_is_refused_while_the_factory_or_a_server_lock_is_held() {
     unsafe { factory.LockServer(false) }.unwrap();
     drop(factory);
     assert_eq!(dll.can_unload(), S_OK, "lock released");
+}
+
+/// The handler must stay inside [idCmdFirst, idCmdLast] and must not write
+/// through a zero-sized GetCommandString buffer.
+#[test]
+fn menu_honours_the_id_range_and_the_buffer_size() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // SAFETY: test-only switch read by the DLL; set before any COM object exists.
+    unsafe { std::env::set_var("WIN_MAKE_RO_SYNC", "1") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked.txt");
+    let free = dir.path().join("free.txt");
+    fs::write(&locked, b"l").unwrap();
+    fs::write(&free, b"f").unwrap();
+    let _g = Guard(locked.clone());
+
+    let dll = Dll::load();
+    let ctx = context_menu(&dll, &[&locked]);
+    assert_eq!(query(&ctx), vec![("Make read only".to_string(), true)]);
+    invoke(&ctx, 0);
+    drop(ctx);
+
+    // Mixed selection wants two items, but only one id is available.
+    let ctx = context_menu(&dll, &[&locked, &free]);
+    assert_eq!(query(&ctx).len(), 2, "both items fit in a wide range");
+    let items = query_range(&ctx, 1000, 1000);
+    assert_eq!(items.len(), 1, "only one id was offered");
+    assert_eq!(items[0].2, 1000, "id outside [first, last]");
+    let none = query_range(&ctx, 1000, 999);
+    assert!(none.is_empty(), "no room at all");
+
+    // A zero-sized buffer must be left untouched.
+    let items = query_range(&ctx, 1000, 1001);
+    assert_eq!(items.len(), 2);
+    let mut buf = [0x1234u16; 8];
+    // SAFETY: pszname points at buf; cchmax = 0 is the case under test.
+    let _ =
+        unsafe { ctx.GetCommandString(0, GCS_VERBW, None, PSTR(buf.as_mut_ptr() as *mut u8), 0) };
+    assert_eq!(buf, [0x1234u16; 8], "wrote through a zero-sized buffer");
+    drop(ctx);
 }
 
 #[test]

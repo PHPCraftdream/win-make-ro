@@ -30,16 +30,24 @@ pub fn lock(path: &Path) -> Result<bool> {
     if was_null {
         b.push_allow_all(&everyone).map_err(io)?;
     }
-    for a in old {
-        b.push(a).map_err(io)?;
+    for a in old.iter() {
+        b.push(*a).map_err(io)?;
     }
     // Files: the attribute blocks delete/rename via parent FILE_DELETE_CHILD.
     // Set it first; once the DACL is in place nobody may write attributes.
+    let mut attr_set = false;
     if !meta.is_dir() {
-        set_readonly_attr(path, true).map_err(io)?;
+        match set_readonly_attr(path, true) {
+            Ok(changed) => attr_set = changed,
+            // A locked parent denies WRITE_ATTRIBUTES, so the attribute cannot
+            // be set — but it also denies the FILE_DELETE_CHILD the attribute
+            // guards against, so the lock is still complete without it.
+            Err(_) if old.iter().any(|a| a.inherited() && a.is_lock(&everyone)) => {}
+            Err(e) => return Err(Error::os(path, e)),
+        }
     }
     if let Err(e) = write_dacl(path, &wide, b.acl()) {
-        if !meta.is_dir() {
+        if attr_set {
             let _ = set_readonly_attr(path, false);
         }
         return Err(e);

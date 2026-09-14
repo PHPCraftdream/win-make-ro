@@ -36,8 +36,10 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
   lock materialises the implied allow alongside the deny, and unlocking puts
   the NULL DACL back rather than leaving an empty one, which would deny
   everyone everything.
-- Items that are locked only through a parent show a disabled entry
-  *Read only (inherited from parent folder)*; unlock the parent instead.
+- Items that are locked through a parent show a disabled entry *Read only
+  (inherited from parent folder)*; unlock the parent instead. Removing an
+  item's own ACE while a parent's lock still applies is refused, since it
+  could not make the item writable anyway.
 - Symlinks and junctions are never touched or descended.
 - Changing a DACL needs `WRITE_DAC`. The owner always has it, so own files need
   no elevation. On `ERROR_ACCESS_DENIED` the helper re-launches itself through
