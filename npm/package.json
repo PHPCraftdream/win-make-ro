@@ -29,10 +29,9 @@
     "node": ">=16"
   },
   "bin": {
-    "win-make-ro": "bin/win-make-ro.js"
+    "win-make-ro": "vendor/win-make-ro.exe"
   },
   "files": [
-    "bin/",
     "scripts/",
     "vendor/",
     "README.md",

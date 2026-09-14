@@ -138,3 +138,89 @@ fn a_lone_surrogate_in_the_name_is_handled_not_mangled() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     fs::write(&odd, b"y").unwrap();
 }
+
+/// Overlapping targets used to give different results depending on the order
+/// they were typed in: unlocking a child first was refused while its parent
+/// was still locked, even though both ended up unlocked either way.
+#[test]
+fn overlapping_targets_behave_the_same_in_either_order() {
+    for reversed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("parent");
+        fs::create_dir(&parent).unwrap();
+        let child = parent.join("child.txt");
+        fs::write(&child, b"x").unwrap();
+        let _g = Guard(parent.clone());
+
+        assert!(run(&["lock", "--no-elevate"], &[&parent]).status.success());
+        let targets: Vec<&Path> =
+            if reversed { vec![&child, &parent] } else { vec![&parent, &child] };
+        let o = run(&["unlock", "--no-elevate"], &targets);
+        assert!(
+            o.status.success(),
+            "reversed={reversed}: exit {:?}: {}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(String::from_utf8_lossy(&o.stderr).is_empty(), "reversed={reversed}");
+        fs::write(&child, b"y").unwrap();
+    }
+}
+
+/// A selection larger than a command line has to travel some other way. The
+/// helper reads the list from a file and removes it afterwards.
+#[test]
+fn a_selection_too_large_for_a_command_line_goes_through_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let _g = Guard(dir.path().to_path_buf());
+    let mut paths = Vec::new();
+    for i in 0..200 {
+        // Long enough that 200 of them cannot share one command line.
+        let p = dir.path().join(format!("{}-{i:03}.txt", "n".repeat(160)));
+        fs::write(&p, b"x").unwrap();
+        paths.push(p);
+    }
+    assert!(!ro_core::fits_command_line(64, &paths), "the fixture is not large enough");
+
+    let list = ro_core::write_paths_file(&paths).unwrap();
+    let o = Command::new(EXE)
+        .args(["lock", "--no-elevate", "--paths-from"])
+        .arg(&list)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(!list.exists(), "the list was left behind");
+    for p in &paths {
+        assert!(fs::write(p, b"y").is_err(), "{} stayed writable", p.display());
+    }
+
+    let list = ro_core::write_paths_file(&paths).unwrap();
+    let o = Command::new(EXE)
+        .args(["unlock", "--no-elevate", "--paths-from"])
+        .arg(&list)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    fs::write(&paths[0], b"y").unwrap();
+}
+
+/// The list is UTF-16, so a name that is not valid Unicode survives it.
+#[test]
+fn a_path_list_keeps_a_lone_surrogate() {
+    let dir = tempfile::tempdir().unwrap();
+    let odd =
+        dir.path().join(OsString::from_wide(&[b'a' as u16, 0xD800, b'.' as u16, b't' as u16]));
+    fs::write(&odd, b"x").unwrap();
+    let _g = Guard(odd.clone());
+
+    let list = ro_core::write_paths_file(std::slice::from_ref(&odd)).unwrap();
+    assert_eq!(ro_core::read_paths_file(&list).unwrap(), vec![odd.clone()]);
+
+    let o = Command::new(EXE)
+        .args(["lock", "--no-elevate", "--paths-from"])
+        .arg(&list)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(fs::write(&odd, b"y").is_err(), "the wrong file was locked");
+}

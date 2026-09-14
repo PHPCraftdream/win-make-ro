@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use ro_core::unlock_tree;
-use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::System::Com::{IClassFactory, IDataObject};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Shell::{
@@ -78,6 +78,16 @@ pub fn ensure_built() {
 
 pub struct Dll {
     pub module: HMODULE,
+}
+
+/// Balances the load. Without this every test leaves a reference behind, and
+/// the one that measures what a load/unload cycle costs would never actually
+/// unload the DLL — it would pass while measuring nothing.
+impl Drop for Dll {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from LoadLibraryW in `load`.
+        let _ = unsafe { FreeLibrary(self.module) };
+    }
 }
 
 impl Dll {

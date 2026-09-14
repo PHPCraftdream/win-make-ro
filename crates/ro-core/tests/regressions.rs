@@ -9,13 +9,16 @@ use ro_core::{
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
 };
 use windows::Win32::Security::{
     ACE_HEADER, ACL, ACL_REVISION, AddAce, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
-    GetLengthSid, INHERIT_ONLY_ACE, InitializeAcl, OBJECT_INHERIT_ACE, PSID,
+    GetLengthSid, GetSecurityDescriptorDacl, INHERIT_ONLY_ACE, InitializeAcl, OBJECT_INHERIT_ACE,
+    PSECURITY_DESCRIPTOR, PSID,
 };
-use windows::core::PCWSTR;
+use windows::core::{PCWSTR, PWSTR};
 
 struct Guard(PathBuf);
 
@@ -28,6 +31,47 @@ impl Drop for Guard {
             .args(["/reset", "/t", "/c", "/q"])
             .output();
     }
+}
+
+/// The DACL in SDDL form. Unlike icacls output this does not change with the
+/// system language, so assertions on it hold on any Windows.
+fn dacl_sddl(path: &Path) -> String {
+    let wide = wide_path(path).unwrap();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: wide is NUL-terminated; sd receives a LocalAlloc'd descriptor.
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            &mut sd,
+        )
+    };
+    assert_eq!(rc, ERROR_SUCCESS, "read security descriptor");
+    let mut text = PWSTR::null();
+    // SAFETY: sd is the descriptor just read; text receives a LocalAlloc'd string.
+    unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            None,
+        )
+    }
+    .expect("descriptor to sddl");
+    // SAFETY: text is a NUL-terminated string owned by us until freed below.
+    let out = unsafe { text.to_string() }.expect("utf16");
+    // SAFETY: both allocations came from the calls above.
+    unsafe {
+        LocalFree(Some(HLOCAL(text.0.cast())));
+        LocalFree(Some(HLOCAL(sd.0)));
+    }
+    out
 }
 
 fn icacls_text(path: &Path) -> String {
@@ -227,15 +271,16 @@ fn explicit_full_control_survives_a_lock_unlock_cycle_unchanged() {
     let _g = Guard(f.clone());
     icacls(&[f.as_os_str(), "/inheritance:r".as_ref()]);
     icacls(&[f.as_os_str(), "/grant".as_ref(), "*S-1-1-0:(F)".as_ref()]);
-    let before = icacls_text(&f);
-    assert!(before.contains("Everyone:(F)"), "{before}");
+    let before = dacl_sddl(&f);
+    assert!(before.contains("(A;;FA;;;WD)"), "{before}");
 
     assert!(lock(&f).unwrap());
     assert!(fs::write(&f, b"y").is_err());
     assert!(unlock(&f).unwrap());
 
-    let after = icacls_text(&f);
-    assert!(!after.contains("All users have full control"), "turned into a NULL DACL: {after}");
+    let after = dacl_sddl(&f);
+    // A NULL DACL is spelled NO_ACCESS_CONTROL in SDDL.
+    assert!(!after.contains("NO_ACCESS_CONTROL"), "turned into a NULL DACL: {after}");
     assert_eq!(after, before, "the ACL did not come back unchanged");
     fs::write(&f, b"y").unwrap();
 }
@@ -282,7 +327,8 @@ fn inheritable_full_control_is_not_mistaken_for_a_null_dacl() {
 
     assert_eq!(fs::read(&f).unwrap(), b"x", "child lost its inherited permissions");
     fs::write(&f, b"y").unwrap();
-    assert!(icacls_text(&root).contains("(OI)(CI)(F)"), "{}", icacls_text(&root));
+    let sddl = dacl_sddl(&root);
+    assert!(sddl.contains("(A;OICI;FA;;;WD)"), "{sddl}");
 }
 
 /// Under a locked parent the inherited deny already blocks WRITE_ATTRIBUTES,
@@ -352,4 +398,67 @@ fn inherit_only_ace_does_not_count_as_a_lock() {
     assert_eq!(lock_state(&root).unwrap(), LockState::Explicit);
     assert!(fs::create_dir(root.join("sub2")).is_err());
     assert!(unlock(&root).unwrap());
+}
+
+/// Applies `sddl` (a DACL-only descriptor) to `path`. Inheritance is left on,
+/// so the entries a parent propagates still arrive alongside it.
+fn set_dacl_from_sddl(path: &Path, sddl: &str) {
+    let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: wide_sddl is NUL-terminated; sd receives a LocalAlloc'd descriptor.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(wide_sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
+        )
+    }
+    .expect("parse sddl");
+    let mut present = windows::core::BOOL(0);
+    let mut defaulted = windows::core::BOOL(0);
+    let mut acl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: sd is a valid descriptor from the call above.
+    unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut acl, &mut defaulted) }
+        .expect("read dacl");
+    assert!(present.as_bool(), "the sddl carries no DACL");
+    let wide = wide_path(path).unwrap();
+    // SAFETY: wide is NUL-terminated; acl belongs to the live descriptor.
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            PCWSTR(wide.as_ptr()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl),
+            None,
+        )
+    };
+    // SAFETY: sd came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+    assert_eq!(rc, ERROR_SUCCESS, "apply sddl");
+}
+
+/// A conditional allow (SDDL `XA`, ACE type 9) grants exactly like a plain one
+/// and is evaluated before an inherited deny, so treating only type 0 as
+/// "allow" left the child writable while the tool called it locked.
+#[test]
+fn a_conditional_allow_on_a_child_is_not_mistaken_for_harmless() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    let _g = Guard(root.clone());
+    let f = root.join("conditional.txt");
+    fs::write(&f, b"x").unwrap();
+    // Everyone, full access, guarded by a condition that always holds.
+    set_dacl_from_sddl(&f, "D:(XA;;FA;;;WD;(Member_of {SID(S-1-1-0)}))");
+
+    let rep = lock_tree(&root);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert!(fs::write(&f, b"y").is_err(), "the conditional allow kept the child writable");
+
+    let rep = unlock_tree(&root);
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    fs::write(&f, b"z").unwrap();
 }

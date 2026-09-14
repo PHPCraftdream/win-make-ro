@@ -2,7 +2,7 @@ use windows::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACE_HEADER, EqualSid, INHERIT_ONLY_ACE, INHERITED_ACE, PSID,
 };
 
-use super::{ALLOW_TYPE, DENY_TYPE};
+use super::{DENY_TYPE, DENY_TYPES};
 use crate::types::LOCK_MASK;
 use crate::win::Sid;
 
@@ -33,8 +33,15 @@ impl AceRef {
         self.flags() & INHERIT_ONLY_ACE.0 != 0
     }
 
-    pub fn is_allow(&self) -> bool {
-        self.header().AceType == ALLOW_TYPE
+    /// Whether this ACE can hand out the rights in its mask.
+    ///
+    /// Deliberately not a test for `ACCESS_ALLOWED_ACE_TYPE`: a conditional
+    /// allow (`ACCESS_ALLOWED_CALLBACK_ACE_TYPE`, SDDL `XA`) grants exactly
+    /// like a plain one, and so do the object variants. Everything that is not
+    /// a known deny counts, so an ACE type we do not recognise is treated as
+    /// granting rather than waved through.
+    pub fn grants(&self) -> bool {
+        !DENY_TYPES.contains(&self.header().AceType)
     }
 
     /// Access mask. Allow and deny ACEs share `ACCESS_ALLOWED_ACE`'s layout.

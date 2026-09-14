@@ -2,6 +2,16 @@ use super::{Args, Command, EXIT_ERRORS, EXIT_OK};
 use crate::ops::{apply, elevate, report_errors, status};
 
 pub fn run(args: Args) -> i32 {
+    let code = dispatch(&args);
+    // The list has served its purpose, whether the work succeeded, failed or
+    // was handed to an elevated child that already removed it.
+    if let Some(file) = &args.paths_file {
+        ro_core::remove_paths_file(file);
+    }
+    code
+}
+
+fn dispatch(args: &Args) -> i32 {
     match args.command {
         Command::Status => status(&args.paths),
         Command::Install => registry(args.gui, install_here()),
@@ -11,7 +21,7 @@ pub fn run(args: Args) -> i32 {
         Command::Lock | Command::Unlock => {
             let report = apply(args.command, &args.paths);
             if report.needs_elevation() && !args.no_elevate {
-                return elevate(&args);
+                return elevate(args);
             }
             if report.errors.is_empty() {
                 EXIT_OK

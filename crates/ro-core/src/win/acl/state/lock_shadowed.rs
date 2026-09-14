@@ -14,7 +14,7 @@ pub fn lock_shadowed(dacl: &Dacl, everyone: &Sid) -> bool {
         if ace.is_lock(everyone) {
             return false;
         }
-        if ace.is_allow() && ace.mask() & LOCK_MASK != 0 {
+        if ace.grants() && ace.mask() & LOCK_MASK != 0 {
             return true;
         }
     }

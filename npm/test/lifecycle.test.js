@@ -42,16 +42,27 @@ test("every declared script exists", () => {
     const file = command.replace(/^node\s+/, "");
     assert.ok(fs.existsSync(path.join(root, file)), `${file} is missing`);
   }
-  assert.ok(fs.existsSync(path.join(root, pkg.bin["win-make-ro"])));
+});
+
+// Node replaces an unpaired surrogate with U+FFFD while building process.argv,
+// so a JS launcher cannot forward a file name that contains one — it would
+// hand the operation a different path. The shim npm writes for a native
+// executable passes the command line through untouched.
+test("the command is the native executable, not a JS launcher", () => {
+  const entry = pkg.bin["win-make-ro"];
+  assert.equal(entry, "vendor/win-make-ro.exe", "the bin entry must be the packaged exe");
+  assert.ok(!entry.endsWith(".js"), "a JS launcher loses unpaired surrogates in argv");
+  assert.ok(pkg.files.includes("vendor/"), "the executable has to be published");
 });
 
 test("publishes the binaries and nothing private", () => {
   assert.deepEqual(pkg.os, ["win32"]);
   assert.deepEqual(pkg.cpu, ["x64"]);
-  for (const entry of ["bin/", "scripts/", "vendor/"]) {
+  for (const entry of ["scripts/", "vendor/"]) {
     assert.ok(pkg.files.includes(entry), `${entry} is not published`);
   }
   assert.ok(!pkg.files.includes("test/"), "the tests are not part of the package");
+  assert.ok(!pkg.files.includes("bin/"), "there is no JS launcher to publish");
 });
 
 // npm hides the output of scripts that succeed, so the install-time notice

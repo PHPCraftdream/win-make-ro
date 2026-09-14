@@ -5,16 +5,15 @@ mod common;
 use std::ffi::OsString;
 use std::fs;
 use std::os::windows::ffi::OsStringExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ro_core::{LockState, lock_state};
-use windows::Win32::Foundation::FreeLibrary;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources};
 use windows::Win32::UI::Shell::{CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, SEE_MASK_UNICODE};
 use windows::core::{PCSTR, PCWSTR};
 
-use common::{COM_TESTS, Dll, Guard, context_menu, query};
+use common::{COM_TESTS, Dll, Guard, context_menu, invoke, query};
 
 /// A file name may hold an unpaired surrogate. Folding it into U+FFFD points
 /// the handler at a different path, so the menu described the wrong file.
@@ -107,8 +106,9 @@ fn the_menu_bitmap_is_released_with_the_object() {
         let ctx = context_menu(&dll, paths);
         query(&ctx);
         drop(ctx);
-        // SAFETY: every object handed out above has been released.
-        unsafe { FreeLibrary(dll.module) }.expect("FreeLibrary");
+        // Dropping the handle releases the module, so each round is a whole
+        // load/unload cycle.
+        drop(dll);
     };
 
     // Warm-up: the first menu also pulls in GDI state that is not ours.
@@ -169,5 +169,45 @@ fn a_numeric_id_is_read_from_lp_verb_even_under_the_unicode_mask() {
 
     assert_eq!(lock_state(&locked).unwrap(), LockState::Unlocked, "item 1 did not run");
     assert_eq!(lock_state(&free).unwrap(), LockState::Unlocked, "the unlocked file got locked");
+    drop(ctx);
+}
+
+/// Explorer hands over the whole selection, and a few hundred long names do
+/// not fit on a command line. The handler used to build one anyway and
+/// InvokeCommand failed outright.
+#[test]
+fn a_selection_too_large_for_a_command_line_still_runs() {
+    let _serial = COM_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: first COM call on this thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // SAFETY: test-only switch read by the DLL; set before any COM object exists.
+    unsafe { std::env::set_var("WIN_MAKE_RO_SYNC", "1") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let _g = Guard(dir.path().to_path_buf());
+    let mut owned = Vec::new();
+    for i in 0..200 {
+        let p = dir.path().join(format!("{}-{i:03}.txt", "n".repeat(160)));
+        fs::write(&p, b"x").unwrap();
+        owned.push(p);
+    }
+    let paths: Vec<&Path> = owned.iter().map(PathBuf::as_path).collect();
+    assert!(!ro_core::fits_command_line(64, &paths), "the fixture is not large enough");
+
+    let dll = Dll::load();
+    let ctx = context_menu(&dll, &paths);
+    // Past the probe limit the state of each item is not read, so both
+    // commands are offered and the one picked decides.
+    assert_eq!(
+        query(&ctx),
+        vec![("Make read only".to_string(), true), ("Remove read only".to_string(), true)]
+    );
+    invoke(&ctx, 0);
+    for p in &owned {
+        assert!(fs::write(p, b"y").is_err(), "{} stayed writable", p.display());
+    }
+    invoke(&ctx, 1);
+    fs::write(&owned[0], b"y").unwrap();
+    fs::write(owned.last().unwrap(), b"y").unwrap();
     drop(ctx);
 }

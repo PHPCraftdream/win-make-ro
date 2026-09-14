@@ -45,6 +45,9 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 - Changing a DACL needs `WRITE_DAC`. The owner always has it, so own files need
   no elevation. On `ERROR_ACCESS_DENIED` the helper re-launches itself through
   UAC and re-runs the same (idempotent) operation.
+- Windows checks access when a handle is opened, not when it is used, so a
+  program that already had the file open for writing keeps that right until it
+  closes the handle. The lock applies to everything opened after it.
 
 ## Layout
 
@@ -111,8 +114,8 @@ there, which costs nothing but shows no menu items either.
 ```
 cargo build --release
 mkdir dist && copy target\release\win-make-ro.exe dist\ && copy target\release\ro_shellext.dll dist\
-dist\install.cmd                    # = dist\win-make-ro.exe install   (or regsvr32 dist\ro_shellext.dll)
-dist\uninstall.cmd                  # = dist\win-make-ro.exe uninstall (or regsvr32 /u dist\ro_shellext.dll)
+dist\win-make-ro.exe install        # or: regsvr32 dist\ro_shellext.dll
+dist\win-make-ro.exe uninstall      # or: regsvr32 /u dist\ro_shellext.dll
 ```
 
 Registration is per user and needs no admin rights. Keep `win-make-ro.exe`

@@ -25,6 +25,20 @@ pub fn elevate(args: &Args) -> i32 {
             return EXIT_ERRORS;
         }
     };
+    // A selection can outgrow the command line, and the child would then be
+    // handed a truncated list. The same file channel the shell extension uses
+    // carries it instead.
+    if child.paths_file.is_none()
+        && !ro_core::fits_command_line(exe.as_os_str().encode_wide().count() + 64, &child.paths)
+    {
+        match ro_core::write_paths_file(&child.paths) {
+            Ok(file) => child.paths_file = Some(file),
+            Err(e) => {
+                show_error(args.gui, &format!("cannot pass the selection on: {e}"));
+                return EXIT_ERRORS;
+            }
+        }
+    }
     let wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
     let verb = wide(OsStr::new("runas"));
     let file = wide(exe.as_os_str());
@@ -63,6 +77,11 @@ pub fn elevate(args: &Args) -> i32 {
         WaitForSingleObject(info.hProcess, INFINITE);
         let _ = GetExitCodeProcess(info.hProcess, &mut code);
         let _ = CloseHandle(info.hProcess);
+    }
+    // The child removes the list it was given; this is only for the case where
+    // it never got far enough to do so.
+    if let Some(file) = &child.paths_file {
+        ro_core::remove_paths_file(file);
     }
     code as i32
 }
