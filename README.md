@@ -75,6 +75,19 @@ trustee is recognised as ours, nothing else is. No extra marker is stored.
 - Windows checks access when a handle is opened, not when it is used, so a
   program that already had the file open for writing keeps that right until it
   closes the handle. The lock applies to everything opened after it.
+- A folder is not sealed all at once. NTFS keeps a DACL per file, and Windows
+  rewrites them one at a time while `SetNamedSecurityInfoW` runs, top to
+  bottom; until it reaches a given file, that file is still writable. Measured
+  on an ordinary SSD: 3 000 files take about a fifth of a second, 30 000 about
+  two. There is no way round it — writing a DACL on a folder walks the whole
+  subtree whether or not the entry being written is inheritable, since every
+  child's inherited entries have to be recomputed. So Explorer is told to
+  re-read the folder once a second while the work runs and once more when it
+  ends: the read-only marks spread through the listing as the lock does, and
+  the last refresh is the one that says it is finished. Work that is over
+  inside the first second gets only that last refresh — a small folder should
+  not flicker. The refreshes cost about 150 ms on a 30 000-file folder and
+  nothing at all on a small one.
 
 ## Layout
 

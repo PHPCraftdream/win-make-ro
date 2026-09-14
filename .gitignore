@@ -6,3 +6,5 @@ npm/vendor/ro_shellext.dll
 npm/README.md
 npm/LICENSE-MIT
 npm/LICENSE-APACHE
+# left by `npm pack` when staging the package by hand
+npm/*.tgz
