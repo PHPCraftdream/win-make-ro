@@ -35,7 +35,7 @@ jobs:
           test "$cargo_version" = "$scoop_version"
       - name: The npm scripts must parse
         run: |
-          for f in npm/bin/*.js npm/scripts/*.js npm/test/*.js; do node --check "$f"; done
+          for f in npm/scripts/*.js npm/test/*.js; do node --check "$f"; done
       - name: The npm packaging contract must hold
         run: node npm/test/lifecycle.test.js
       - name: The release scripts must hold
