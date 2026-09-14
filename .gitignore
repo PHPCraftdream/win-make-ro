@@ -2,3 +2,7 @@ target/
 dist/
 npm/vendor/win-make-ro.exe
 npm/vendor/ro_shellext.dll
+# staged by the release workflow, not source
+npm/README.md
+npm/LICENSE-MIT
+npm/LICENSE-APACHE
