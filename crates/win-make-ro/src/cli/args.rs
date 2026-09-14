@@ -11,8 +11,12 @@ pub struct Args {
     /// Never re-launch elevated (also set on the elevated child).
     pub no_elevate: bool,
     /// Where `paths` came from, when a selection was too large for a command
-    /// line. Whoever acts on the list removes the file afterwards.
+    /// line.
     pub paths_file: Option<PathBuf>,
+    /// Whether that file was handed over to be removed once it has been read.
+    /// A list the caller named themselves is theirs and is left alone; only
+    /// the one-shot list the shell extension writes is ours to delete.
+    pub consume_paths_file: bool,
 }
 
 impl Args {
@@ -24,19 +28,26 @@ impl Args {
             .to_str()
             .and_then(Command::parse)
             .ok_or_else(|| format!("unknown command: {}", word.to_string_lossy()))?;
-        let mut args =
-            Args { command, paths: Vec::new(), gui: false, no_elevate: false, paths_file: None };
+        let mut args = Args {
+            command,
+            paths: Vec::new(),
+            gui: false,
+            no_elevate: false,
+            paths_file: None,
+            consume_paths_file: false,
+        };
         let mut opts_done = false;
-        let mut want_paths_file = false;
+        // The option that asked for a file, and whether it hands it over.
+        let mut want_paths_file: Option<(&'static str, bool)> = None;
         let mut typed_paths = false;
         for a in it {
-            if want_paths_file {
-                want_paths_file = false;
+            if let Some((opt, consume)) = want_paths_file.take() {
                 let file = PathBuf::from(a);
                 let listed = ro_core::read_paths_file(&file)
-                    .map_err(|e| format!("--paths-from {}: {e}", file.display()))?;
+                    .map_err(|e| format!("{opt} {}: {e}", file.display()))?;
                 args.paths.extend(listed);
                 args.paths_file = Some(file);
+                args.consume_paths_file = consume;
                 continue;
             }
             // Only a valid-Unicode argument can be an option; anything else is
@@ -47,9 +58,15 @@ impl Args {
                 Some("--no-elevate") if !opts_done => args.no_elevate = true,
                 Some("--paths-from") if !opts_done => {
                     if args.paths_file.is_some() {
-                        return Err("--paths-from can only be given once".into());
+                        return Err("a path list can only be given once".into());
                     }
-                    want_paths_file = true;
+                    want_paths_file = Some(("--paths-from", false));
+                }
+                Some("--consume-paths-from") if !opts_done => {
+                    if args.paths_file.is_some() {
+                        return Err("a path list can only be given once".into());
+                    }
+                    want_paths_file = Some(("--consume-paths-from", true));
                 }
                 Some(s) if !opts_done && s.starts_with("--") => {
                     return Err(format!("unknown option: {s}"));
@@ -60,14 +77,14 @@ impl Args {
                 }
             }
         }
-        if want_paths_file {
-            return Err("--paths-from needs a file".into());
+        if let Some((opt, _)) = want_paths_file {
+            return Err(format!("{opt} needs a file"));
         }
         // The list is the whole selection: re-encoding for an elevated child
         // passes the file on rather than the paths in it, so a target named
         // beside it would be handed to nobody.
         if args.paths_file.is_some() && typed_paths {
-            return Err("--paths-from cannot be combined with paths on the command line".into());
+            return Err("a path list cannot be combined with paths on the command line".into());
         }
         if command.takes_paths() && args.paths.is_empty() {
             return Err(format!("{}: at least one path required", command.as_str()));
@@ -88,9 +105,11 @@ impl Args {
             v.push("--no-elevate".into());
         }
         // The list stays in the file when there is one: re-expanding it on the
-        // command line is what did not fit in the first place.
+        // command line is what did not fit in the first place. The spelling is
+        // kept as well, so the child inherits the same claim on the file.
         if let Some(file) = &self.paths_file {
-            v.push("--paths-from".into());
+            let opt = if self.consume_paths_file { "--consume-paths-from" } else { "--paths-from" };
+            v.push(opt.into());
             v.push(file.clone().into_os_string());
             return v;
         }
@@ -134,6 +153,8 @@ mod tests {
         assert!(parse(&["lock"]).is_err());
         assert!(parse(&["install", "x"]).is_err());
         assert!(parse(&["install"]).is_ok());
+        assert!(parse(&["reinstall", "x"]).is_err());
+        assert!(parse(&["reinstall"]).is_ok());
     }
 
     #[test]
@@ -158,7 +179,25 @@ mod tests {
         assert!(parse(&["lock", "--paths-from", &name, r"C:\extra.txt"]).is_err());
         assert!(parse(&["lock", r"C:\extra.txt", "--paths-from", &name]).is_err());
         assert!(parse(&["lock", "--paths-from", &name, "--paths-from", &name]).is_err());
+        assert!(parse(&["lock", "--paths-from", &name, "--consume-paths-from", &name]).is_err());
         assert!(parse(&["lock", "--paths-from", &name]).is_ok());
+        ro_core::remove_paths_file(&list);
+    }
+
+    /// Which of the two spellings brought the list decides whether the file is
+    /// ours to remove, so the child has to be told the same thing the parent
+    /// was told.
+    #[test]
+    fn the_claim_on_the_list_survives_re_encoding() {
+        let list = list_file(&[r"C:\one.txt"]);
+        let name = list.to_str().expect("temp dir is plain text").to_string();
+        for (opt, consume) in [("--paths-from", false), ("--consume-paths-from", true)] {
+            let a = parse(&["lock", opt, &name]).unwrap();
+            assert_eq!(a.consume_paths_file, consume, "{opt}");
+            let argv = a.to_argv();
+            assert!(argv.iter().any(|x| x == opt), "{opt} was not re-emitted: {argv:?}");
+            assert_eq!(Args::parse(argv.into_iter()).unwrap(), a, "{opt}");
+        }
         ro_core::remove_paths_file(&list);
     }
 

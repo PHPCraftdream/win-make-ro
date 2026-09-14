@@ -10,7 +10,7 @@ const path = require("node:path");
 
 const root = path.join(__dirname, "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const { REMOVAL_NOTICE } = require("../scripts/paths.js");
+const { REGISTER_COMMANDS, REMOVAL_NOTICE } = require("../scripts/paths.js");
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -75,6 +75,16 @@ test("the README documents the removal order", () => {
   assert.ok(remove !== -1, "the README does not mention `npm uninstall -g win-make-ro`");
   assert.ok(unregister < remove, "unregistering has to be documented first");
   assert.match(readme, /--foreground-scripts/, "the README does not say how to see the notice");
+});
+
+// An upgrade rewrites the DLL a running Explorer still has mapped, so plain
+// registration would leave the old code in place until the next logout.
+// `reinstall` swaps it and restarts Explorer; `install` is only the fallback
+// for an elevated shell, where restarting Explorer is not allowed.
+test("a global install asks for a reinstall before a plain install", () => {
+  assert.deepEqual(REGISTER_COMMANDS, ["reinstall", "install"]);
+  const source = fs.readFileSync(path.join(root, "scripts", "postinstall.js"), "utf8");
+  assert.match(source, /REGISTER_COMMANDS\.find\(run\)/, "the order above has to be the one used");
 });
 
 // A failed registration must never fail `npm install`.

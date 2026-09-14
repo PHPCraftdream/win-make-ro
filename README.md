@@ -68,7 +68,8 @@ release workflow).
 ## Install
 
 Either package registers the Explorer context menu for the current user, with
-no admin rights.
+no admin rights. The C runtime is linked into the binaries, so nothing has to
+be installed alongside them.
 
 ```
 scoop bucket add win-make-ro https://github.com/PHPCraftdream/win-make-ro
@@ -82,6 +83,17 @@ npm install -g win-make-ro
 The npm package ships the binaries and is marked `win32`/`x64`; a project-local
 install deliberately skips registration, so run `npx win-make-ro install` for
 that case. Set `WIN_MAKE_RO_SKIP_REGISTER=1` to suppress it entirely.
+
+A global install runs `reinstall` (see below), so **upgrading restarts
+Explorer**: npm has just rewritten the DLL the running one still has mapped,
+and only a restart makes the new code the one in use. A first install has
+nothing loaded and leaves the desktop alone. From an elevated shell the restart
+is skipped — Explorer would keep the elevated token — and the install says so;
+run `win-make-ro reinstall` yourself from an ordinary window.
+
+Upgrading while Explorer holds the DLL can also fail inside npm itself, before
+any script of ours runs, because npm overwrites the file rather than renaming
+it. Restart Explorer and repeat the upgrade if that happens.
 
 A release also carries a zip with both binaries and a `.sha256` beside it, if
 you would rather unpack it yourself and run `win-make-ro.exe install`.
@@ -123,8 +135,28 @@ dist\win-make-ro.exe uninstall      # or: regsvr32 /u dist\ro_shellext.dll
 
 Registration is per user and needs no admin rights. Keep `win-make-ro.exe`
 next to `ro_shellext.dll`; the DLL looks for the helper in its own directory.
-Explorer keeps the DLL loaded after the first use, so replacing `dist\` files
-requires restarting `explorer.exe` first.
+
+Explorer maps the DLL the first time a menu opens and keeps it until it exits,
+so a rebuilt DLL cannot simply be copied over the installed one. `reinstall`
+does the whole exchange:
+
+```
+target\release\win-make-ro.exe reinstall
+```
+
+It takes the two binaries beside it, renames the installed pair aside — a
+rename moves the directory entry and leaves the running Explorer with the image
+it already has — copies the new pair into their place, re-registers, asks
+Explorer to close, starts it again and then deletes the renamed files. Anything
+that was still in use is swept by the next run. With nothing registered yet it
+is an ordinary install and leaves Explorer alone — there is nothing loaded to
+replace — and it refuses to run elevated, since Explorer would inherit the
+elevated token for the rest of the session.
+
+`reinstall` refreshes the installation *at the registered path*. Scoop gives
+each version a directory of its own, so there is nothing to rename there and
+its manifest uses `install`; restart Explorer afterwards to drop the copy it
+still has mapped.
 
 ## CLI
 
@@ -132,6 +164,7 @@ requires restarting `explorer.exe` first.
 win-make-ro lock   [--gui] [--no-elevate] -- <path>...
 win-make-ro unlock [--gui] [--no-elevate] -- <path>...
 win-make-ro status -- <path>...          # prints "<unlocked|locked|inherited>\t<path>"
+win-make-ro install | reinstall | uninstall
 ```
 
 Exit codes: 0 ok, 1 some item failed (details on stderr, or a message box with

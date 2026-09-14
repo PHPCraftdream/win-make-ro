@@ -6,6 +6,7 @@
 
 mod cli;
 mod ops;
+mod reinstall;
 
 fn main() {
     let code = match cli::Args::parse(std::env::args_os().skip(1)) {

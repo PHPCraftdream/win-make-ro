@@ -4,6 +4,7 @@ pub enum Command {
     Unlock,
     Status,
     Install,
+    Reinstall,
     Uninstall,
 }
 
@@ -14,6 +15,7 @@ impl Command {
             "unlock" => Self::Unlock,
             "status" => Self::Status,
             "install" => Self::Install,
+            "reinstall" => Self::Reinstall,
             "uninstall" => Self::Uninstall,
             _ => return None,
         })
@@ -29,6 +31,7 @@ impl Command {
             Self::Unlock => "unlock",
             Self::Status => "status",
             Self::Install => "install",
+            Self::Reinstall => "reinstall",
             Self::Uninstall => "uninstall",
         }
     }

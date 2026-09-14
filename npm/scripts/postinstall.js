@@ -3,10 +3,19 @@
 // Registers the Explorer context menu after a global install. Nothing here is
 // allowed to fail the install: a missing registration is recoverable with one
 // command, an aborted `npm install -g` is not.
+//
+// Why it asks for a reinstall first, and what the fallback is for, is written
+// down beside REGISTER_COMMANDS.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
-const { REMOVAL_NOTICE, exe, isWindows, shouldRegister } = require("./paths.js");
+const {
+  REGISTER_COMMANDS,
+  REMOVAL_NOTICE,
+  exe,
+  isWindows,
+  shouldRegister,
+} = require("./paths.js");
 
 function main() {
   if (!isWindows()) {
@@ -23,15 +32,29 @@ function main() {
     );
     return;
   }
-  const result = spawnSync(exe(), ["install"], { stdio: "inherit" });
-  if (result.error || result.status !== 0) {
-    console.error(
-      "win-make-ro: could not register the context menu.\n" +
-        "             Run `win-make-ro install` to retry."
-    );
-    return;
+
+  switch (REGISTER_COMMANDS.find(run)) {
+    case "reinstall":
+      console.log("win-make-ro: context menu registered for the current user.");
+      return;
+    case "install":
+      console.log(
+        "win-make-ro: context menu registered, but Explorer was not restarted.\n" +
+          "             If it is still running an older copy, run `win-make-ro reinstall`\n" +
+          "             from a window without administrator rights."
+      );
+      return;
+    default:
+      console.error(
+        "win-make-ro: could not register the context menu.\n" +
+          "             Run `win-make-ro install` to retry."
+      );
   }
-  console.log("win-make-ro: context menu registered for the current user.");
+}
+
+function run(command) {
+  const result = spawnSync(exe(), [command], { stdio: "inherit" });
+  return !result.error && result.status === 0;
 }
 
 main();

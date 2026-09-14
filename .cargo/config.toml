@@ -1,0 +1,16 @@
+# Link the C runtime into the binaries instead of importing it.
+#
+# The MSVC target links the CRT dynamically by default, which leaves both the
+# helper and the DLL importing VCRUNTIME140.dll. That DLL is not part of
+# Windows: it arrives with the Visual C++ redistributable, and neither the zip,
+# the npm package nor the Scoop manifest can put it there. On a machine without
+# it the helper never reaches main and Explorer cannot load the extension.
+#
+# Installing the redistributable would need administrator rights, which is the
+# one thing this tool promises not to ask for, so the runtime comes along inside
+# the artifacts. Nothing is passed across the module boundary that would care
+# which CRT allocated it: the DLL starts the helper as a separate process.
+#
+# See https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]

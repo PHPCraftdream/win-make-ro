@@ -220,9 +220,11 @@ fn a_selection_too_large_for_a_command_line_goes_through_a_file() {
     }
     assert!(!ro_core::fits_command_line(64, &paths), "the fixture is not large enough");
 
+    // `--consume-paths-from` is how the shell extension hands its list over:
+    // nothing there can wait for the helper, so the helper removes it.
     let list = ro_core::write_paths_file(&paths).unwrap();
     let o = Command::new(EXE)
-        .args(["lock", "--no-elevate", "--paths-from"])
+        .args(["lock", "--no-elevate", "--consume-paths-from"])
         .arg(&list)
         .output()
         .unwrap();
@@ -234,12 +236,53 @@ fn a_selection_too_large_for_a_command_line_goes_through_a_file() {
 
     let list = ro_core::write_paths_file(&paths).unwrap();
     let o = Command::new(EXE)
-        .args(["unlock", "--no-elevate", "--paths-from"])
+        .args(["unlock", "--no-elevate", "--consume-paths-from"])
         .arg(&list)
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     fs::write(&paths[0], b"y").unwrap();
+}
+
+/// A list named with `--paths-from` belongs to whoever wrote it. Reading it is
+/// no reason to destroy it — least of all for `status`, which changes nothing,
+/// and least of all when the run failed and the list is what a retry needs.
+#[test]
+fn a_path_list_the_caller_named_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    fs::write(&target, b"x").unwrap();
+    let missing = dir.path().join("missing.txt");
+
+    for (paths, code) in [(vec![target.clone()], 0), (vec![missing.clone()], 1)] {
+        let list = dir.path().join("mine.paths");
+        let written = ro_core::write_paths_file(&paths).unwrap();
+        fs::rename(&written, &list).unwrap();
+        let before = fs::read(&list).unwrap();
+
+        let o = Command::new(EXE).args(["status", "--paths-from"]).arg(&list).output().unwrap();
+        assert_eq!(o.status.code(), Some(code), "{}", String::from_utf8_lossy(&o.stderr));
+        assert!(list.is_file(), "the caller's list was deleted");
+        assert_eq!(fs::read(&list).unwrap(), before, "the caller's list was rewritten");
+        fs::remove_file(&list).unwrap();
+    }
+
+    // The same for a command that does change things.
+    let list = dir.path().join("mine.paths");
+    let written = ro_core::write_paths_file(std::slice::from_ref(&target)).unwrap();
+    fs::rename(&written, &list).unwrap();
+    let _g = Guard(target.clone());
+    assert!(
+        Command::new(EXE)
+            .args(["lock", "--no-elevate", "--paths-from"])
+            .arg(&list)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(list.is_file(), "the caller's list was deleted by lock");
+    assert!(fs::write(&target, b"y").is_err(), "the list was read but nothing happened");
 }
 
 /// One allow ACE of the smallest possible shape: header, mask and a SID with a
@@ -341,4 +384,6 @@ fn a_path_list_keeps_a_lone_surrogate() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(fs::write(&odd, b"y").is_err(), "the wrong file was locked");
+    // `--paths-from` leaves the file to its author, which here is this test.
+    ro_core::remove_paths_file(&list);
 }

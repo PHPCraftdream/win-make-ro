@@ -107,7 +107,14 @@ mod tests {
     const EXE: &str = r"C:\win-make-ro.exe";
 
     fn args_for(paths: Vec<PathBuf>) -> Args {
-        Args { command: Command::Lock, paths, gui: false, no_elevate: false, paths_file: None }
+        Args {
+            command: Command::Lock,
+            paths,
+            gui: false,
+            no_elevate: false,
+            paths_file: None,
+            consume_paths_file: false,
+        }
     }
 
     /// The list written for the child belongs to a guard, so a prompt the user

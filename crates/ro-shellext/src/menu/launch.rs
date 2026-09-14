@@ -27,7 +27,9 @@ pub fn launch(helper: &Path, item: Item, paths: &[PathBuf]) -> io::Result<()> {
         command.arg("--").args(paths);
     } else {
         let file = ro_core::write_paths_file(paths)?;
-        command.arg("--paths-from").arg(&file);
+        // Handed over, not lent: nothing here can wait for the helper, so the
+        // helper is the one that removes it.
+        command.arg("--consume-paths-from").arg(&file);
         listed = Some(file);
     }
 
