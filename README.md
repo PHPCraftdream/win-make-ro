@@ -21,9 +21,8 @@ ACLs is disturbed.
 
 ## Status
 
-Version 0.1.0, and no release has been published yet: the `scoop` and `npm`
-instructions below describe how the packages are built and what they do, not
-something you can install today. 99 tests run on every push in each profile,
+Version 0.1.1, published via Scoop and npm — see [Install](#install) below.
+99 tests run on every push in each profile,
 alongside the packaging and release scripts, on Windows 10 — see
 [Tests](#tests) for what they reach and what they do not. Windows 11 has not
 been tried, and neither has the UAC prompt end to end.
