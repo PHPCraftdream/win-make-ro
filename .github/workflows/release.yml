@@ -161,7 +161,13 @@ jobs:
       # The checkout above is a detached tag. Committing the manifest there and
       # pushing to the default branch is rejected the moment that branch has
       # moved on, so the edit is made on top of the branch as it is right now.
+      # Runs even when the npm publish above failed. The two are separate
+      # places to get the same build from, and a registry that refuses - a
+      # name held for twenty-four hours after an unpublish, say - is no reason
+      # to leave the Scoop manifest pointing at a checksum of zeroes. The job
+      # still reports the npm failure.
       - name: Point the Scoop manifest at the new release
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $branch = if ($env:DEFAULT_BRANCH) { $env:DEFAULT_BRANCH } else { "main" }
