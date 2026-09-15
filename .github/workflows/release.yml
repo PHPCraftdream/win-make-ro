@@ -138,7 +138,12 @@ jobs:
 
       # Before the branch switch below, so the package is published from the
       # tagged tree rather than from whatever the default branch holds now.
+      # Trusted publishing needs a package that already exists on the registry
+      # to attach its policy to, so a name's first publish has no OIDC config
+      # to satisfy and has to go through a token instead. Switch back to the
+      # id-token step once win-make-ro has published at least once.
       - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
         shell: pwsh
         working-directory: npm
         run: |
@@ -154,14 +159,13 @@ jobs:
           if ($pkg.version -ne $env:VERSION) {
             throw "npm/package.json is at $($pkg.version), the tag says $env:VERSION"
           }
-          # The exchange that replaces the token is done by the npm CLI itself,
-          # and only a new enough one knows how. The runner's bundled version is
-          # whatever the image happens to ship, so it is not left to chance.
-          npm install -g npm@latest
-          if ($LASTEXITCODE -ne 0) { throw "could not update npm: exit code $LASTEXITCODE" }
-          Write-Host "publishing with npm $(npm --version)"
-          npm publish --access public
+          "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Out-File -Encoding ascii .npmrc
+          try { npm publish --access public } finally { Remove-Item .npmrc -ErrorAction Ignore }
+          # The cleanup above would otherwise become the step's exit code and
+          # hide a failed publish.
           if ($LASTEXITCODE -ne 0) { throw "npm publish failed with exit code $LASTEXITCODE" }
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # The checkout above is a detached tag. Committing the manifest there and
       # pushing to the default branch is rejected the moment that branch has
