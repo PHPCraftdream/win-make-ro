@@ -143,7 +143,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "ro-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "windows",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "ro-register"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows",
  "windows-registry",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "ro-shellext"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "ro-core",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "win-make-ro"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embed-resource",
  "ro-core",
