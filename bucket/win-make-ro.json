@@ -1,12 +1,12 @@
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Explorer context menu: Make / Remove read only for files and folders via an NTFS deny ACE",
   "homepage": "https://github.com/PHPCraftdream/win-make-ro",
   "license": "MIT|Apache-2.0",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/PHPCraftdream/win-make-ro/releases/download/v0.1.0/win-make-ro-0.1.0-x86_64-pc-windows-msvc.zip",
-      "hash": "468ddfae670155eb51d2b3bce2a9c8d97d677c2cffd1accaad0a8f9e423f2196"
+      "url": "https://github.com/PHPCraftdream/win-make-ro/releases/download/v0.1.1/win-make-ro-0.1.1-x86_64-pc-windows-msvc.zip",
+      "hash": "57a70e11fed72daf39f7417b4feb270c1fb177087407c0fe6d0f4a8ce82ecefc"
     }
   },
   "bin": "win-make-ro.exe",
